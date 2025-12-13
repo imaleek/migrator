@@ -1,0 +1,3 @@
+"""
+Migrator Test Suite.
+"""
