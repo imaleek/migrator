@@ -18,28 +18,29 @@ import base64
 import hashlib
 import json
 import re
-from typing import Optional, List, Dict, Any, AsyncIterator, Tuple, Callable
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from urllib.parse import urljoin, quote
+from typing import Any
+from urllib.parse import quote, urljoin
 
 import httpx
 from tenacity import (
     retry,
+    retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
-    retry_if_exception_type,
 )
 
 from config import RegistryCredentials
-from utilities.logger import get_logger
 from utilities.exceptions import MigratorError
+from utilities.logger import get_logger
 
 logger = get_logger(__name__)
 
 
 class RegistryConnectionError(MigratorError):
     """Raised when registry connection fails."""
-    def __init__(self, registry: str, message: str, details: Optional[str] = None):
+    def __init__(self, registry: str, message: str, details: str | None = None):
         self.registry = registry
         super().__init__(f"Failed to connect to {registry}: {message}", details)
 
@@ -53,7 +54,7 @@ class RegistryAuthenticationError(MigratorError):
 
 class ImageTransferError(MigratorError):
     """Raised when image transfer fails."""
-    def __init__(self, image: str, message: str, details: Optional[str] = None):
+    def __init__(self, image: str, message: str, details: str | None = None):
         self.image = image
         super().__init__(f"Failed to transfer {image}: {message}", details)
 
@@ -64,9 +65,9 @@ class ManifestInfo:
     digest: str
     media_type: str
     size: int
-    config_digest: Optional[str] = None
-    layers: List[Dict[str, Any]] = None
-    
+    config_digest: str | None = None
+    layers: list[dict[str, Any]] = None
+
     def __post_init__(self):
         if self.layers is None:
             self.layers = []
@@ -83,11 +84,11 @@ class BlobInfo:
 class RegistryClient:
     """
     HTTP-based container registry client using Registry API v2.
-    
+
     This client directly communicates with container registries over HTTP,
     providing the most efficient way to copy images between registries
     without requiring a local Docker daemon.
-    
+
     Features:
     - Direct blob streaming (no local storage)
     - Parallel layer transfers
@@ -95,7 +96,7 @@ class RegistryClient:
     - Chunked uploads for large layers
     - Automatic authentication handling
     """
-    
+
     # Supported manifest media types
     MANIFEST_TYPES = [
         "application/vnd.docker.distribution.manifest.v2+json",
@@ -103,10 +104,10 @@ class RegistryClient:
         "application/vnd.oci.image.manifest.v1+json",
         "application/vnd.oci.image.index.v1+json",
     ]
-    
+
     # Chunk size for uploads (5MB)
     CHUNK_SIZE = 5 * 1024 * 1024
-    
+
     def __init__(
         self,
         credentials: RegistryCredentials,
@@ -114,36 +115,36 @@ class RegistryClient:
     ):
         """
         Initialize the registry client.
-        
+
         Args:
             credentials: Registry credentials
             timeout: HTTP timeout in seconds
         """
         self.credentials = credentials
         self.timeout = timeout
-        self._client: Optional[httpx.AsyncClient] = None
-        self._token: Optional[str] = None
+        self._client: httpx.AsyncClient | None = None
+        self._token: str | None = None
         self._token_expiry: float = 0
-    
+
     @property
     def base_url(self) -> str:
         """Get the base URL for API requests."""
         return self.credentials.api_base_url
-    
+
     @property
     def registry(self) -> str:
         """Get the registry hostname."""
         return self.credentials.registry
-    
+
     async def __aenter__(self) -> "RegistryClient":
         """Async context manager entry."""
         await self.connect()
         return self
-    
+
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         """Async context manager exit."""
         await self.close()
-    
+
     async def connect(self) -> None:
         """Initialize the HTTP client connection."""
         self._client = httpx.AsyncClient(
@@ -152,24 +153,24 @@ class RegistryClient:
             verify=not self.credentials.insecure,
         )
         logger.debug(f"Connected to registry: {self.registry}")
-    
+
     async def close(self) -> None:
         """Close the HTTP client connection."""
         if self._client:
             await self._client.aclose()
             self._client = None
             logger.debug(f"Disconnected from registry: {self.registry}")
-    
-    def _get_auth_header(self) -> Dict[str, str]:
+
+    def _get_auth_header(self) -> dict[str, str]:
         """Get the authorization header."""
         if self._token:
             return {"Authorization": f"Bearer {self._token}"}
-        
+
         # Basic auth fallback
         auth_string = f"{self.credentials.username}:{self.credentials.password}"
         encoded = base64.b64encode(auth_string.encode()).decode()
         return {"Authorization": f"Basic {encoded}"}
-    
+
     async def _handle_auth_challenge(
         self,
         response: httpx.Response,
@@ -177,41 +178,41 @@ class RegistryClient:
     ) -> None:
         """Handle WWW-Authenticate challenge and obtain token."""
         www_auth = response.headers.get("www-authenticate", "")
-        
+
         if not www_auth.lower().startswith("bearer"):
             # Basic auth is accepted, no token needed
             logger.debug("Registry accepts basic auth")
             return
-        
+
         # Parse Bearer challenge
         # Format: Bearer realm="...",service="...",scope="..."
         params = {}
         for match in re.finditer(r'(\w+)="([^"]*)"', www_auth):
             params[match.group(1)] = match.group(2)
-        
+
         realm = params.get("realm")
         service = params.get("service", "")
-        
+
         if not realm:
             logger.warning("No realm in auth challenge")
             return
-        
+
         # Request token
         token_url = realm
         token_params = {
             "service": service,
             "scope": scope,
         }
-        
+
         logger.debug(f"Requesting token from {realm}")
-        
+
         auth = (self.credentials.username, self.credentials.password)
         token_response = await self._client.get(
             token_url,
             params=token_params,
             auth=auth,
         )
-        
+
         if token_response.status_code == 200:
             data = token_response.json()
             self._token = data.get("token") or data.get("access_token")
@@ -221,7 +222,7 @@ class RegistryClient:
                 self.registry,
                 f"Token request failed: {token_response.status_code}"
             )
-    
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
@@ -230,10 +231,10 @@ class RegistryClient:
     async def check_connectivity(self) -> bool:
         """
         Check if the registry is accessible.
-        
+
         Returns:
             True if registry is accessible
-            
+
         Raises:
             RegistryConnectionError: If connection fails
         """
@@ -242,7 +243,7 @@ class RegistryClient:
                 f"{self.base_url}/",
                 headers=self._get_auth_header(),
             )
-            
+
             if response.status_code == 401:
                 # Need to authenticate
                 await self._handle_auth_challenge(response)
@@ -250,7 +251,7 @@ class RegistryClient:
                     f"{self.base_url}/",
                     headers=self._get_auth_header(),
                 )
-            
+
             if response.status_code == 200:
                 logger.info(f"Successfully connected to {self.registry}")
                 return True
@@ -259,48 +260,48 @@ class RegistryClient:
                     self.registry,
                     f"Unexpected status: {response.status_code}"
                 )
-                
+
         except httpx.TransportError as e:
             raise RegistryConnectionError(
                 self.registry,
                 str(e)
-            )
-    
-    async def list_repositories(self, limit: int = 1000) -> List[str]:
+            ) from e
+
+    async def list_repositories(self, limit: int = 1000) -> list[str]:
         """
         List all repositories in the registry.
-        
+
         Args:
             limit: Maximum number of repositories to return
-            
+
         Returns:
             List of repository names
         """
         repositories = []
         url = f"{self.base_url}/_catalog"
         params = {"n": min(limit, 100)}
-        
+
         while url and len(repositories) < limit:
             response = await self._client.get(
                 url,
                 params=params,
                 headers=self._get_auth_header(),
             )
-            
+
             if response.status_code == 401:
                 await self._handle_auth_challenge(
                     response,
                     "registry:catalog:*"
                 )
                 continue
-            
+
             if response.status_code != 200:
                 logger.warning(f"Failed to list repositories: {response.status_code}")
                 break
-            
+
             data = response.json()
             repositories.extend(data.get("repositories", []))
-            
+
             # Check for pagination
             link = response.headers.get("Link", "")
             if "rel=\"next\"" in link:
@@ -313,27 +314,27 @@ class RegistryClient:
                     break
             else:
                 break
-        
+
         logger.debug(f"Found {len(repositories)} repositories")
         return repositories[:limit]
-    
-    async def list_tags(self, repository: str) -> List[str]:
+
+    async def list_tags(self, repository: str) -> list[str]:
         """
         List all tags for a repository.
-        
+
         Args:
             repository: Repository name
-            
+
         Returns:
             List of tag names
         """
         url = f"{self.base_url}/{quote(repository, safe='')}/tags/list"
-        
+
         response = await self._client.get(
             url,
             headers=self._get_auth_header(),
         )
-        
+
         if response.status_code == 401:
             await self._handle_auth_challenge(
                 response,
@@ -343,74 +344,74 @@ class RegistryClient:
                 url,
                 headers=self._get_auth_header(),
             )
-        
+
         if response.status_code == 404:
             logger.debug(f"Repository not found: {repository}")
             return []
-        
+
         if response.status_code != 200:
             logger.warning(f"Failed to list tags for {repository}: {response.status_code}")
             return []
-        
+
         data = response.json()
         tags = data.get("tags") or []
-        
+
         logger.debug(f"Found {len(tags)} tags for {repository}")
         return tags
-    
+
     async def get_manifest(
         self,
         repository: str,
         reference: str
-    ) -> Tuple[ManifestInfo, bytes]:
+    ) -> tuple[ManifestInfo, bytes]:
         """
         Get the manifest for an image.
-        
+
         Args:
             repository: Repository name
             reference: Tag or digest
-            
+
         Returns:
             Tuple of (ManifestInfo, raw_manifest_bytes)
         """
         url = f"{self.base_url}/{quote(repository, safe='')}/manifests/{reference}"
-        
+
         headers = self._get_auth_header()
         headers["Accept"] = ", ".join(self.MANIFEST_TYPES)
-        
+
         response = await self._client.get(url, headers=headers)
-        
+
         if response.status_code == 401:
             await self._handle_auth_challenge(
                 response,
                 f"repository:{repository}:pull"
             )
             response = await self._client.get(url, headers=headers)
-        
+
         if response.status_code != 200:
             raise ImageTransferError(
                 f"{repository}:{reference}",
                 f"Failed to get manifest: {response.status_code}"
             )
-        
+
         content = response.content
         digest = response.headers.get(
             "Docker-Content-Digest",
             f"sha256:{hashlib.sha256(content).hexdigest()}"
         )
         media_type = response.headers.get("Content-Type", self.MANIFEST_TYPES[0])
-        
+
         manifest_data = response.json()
-        
+
         # Extract layer information
         layers = []
         config_digest = None
-        
+
         if "layers" in manifest_data:
             layers = manifest_data["layers"]
         if "config" in manifest_data:
             config_digest = manifest_data["config"].get("digest")
-        
+
         info = ManifestInfo(
             digest=digest,
             media_type=media_type,
@@ -418,28 +419,28 @@ class RegistryClient:
             config_digest=config_digest,
             layers=layers,
         )
-        
+
         logger.debug(f"Got manifest {digest} for {repository}:{reference}")
         return info, content
-    
+
     async def blob_exists(self, repository: str, digest: str) -> bool:
         """
         Check if a blob exists in the repository.
-        
+
         Args:
             repository: Repository name
             digest: Blob digest
-            
+
         Returns:
             True if blob exists
         """
         url = f"{self.base_url}/{quote(repository, safe='')}/blobs/{digest}"
-        
+
         response = await self._client.head(
             url,
             headers=self._get_auth_header(),
         )
-        
+
         if response.status_code == 401:
             await self._handle_auth_challenge(
                 response,
@@ -449,9 +450,9 @@ class RegistryClient:
                 url,
                 headers=self._get_auth_header(),
             )
-        
+
         return response.status_code == 200
-    
+
     async def stream_blob(
         self,
         repository: str,
@@ -459,16 +460,16 @@ class RegistryClient:
     ) -> AsyncIterator[bytes]:
         """
         Stream a blob's content.
-        
+
         Args:
             repository: Repository name
             digest: Blob digest
-            
+
         Yields:
             Chunks of blob data
         """
         url = f"{self.base_url}/{quote(repository, safe='')}/blobs/{digest}"
-        
+
         async with self._client.stream(
             "GET",
             url,
@@ -479,10 +480,10 @@ class RegistryClient:
                     f"{repository}@{digest}",
                     f"Failed to download blob: {response.status_code}"
                 )
-            
+
             async for chunk in response.aiter_bytes(chunk_size=self.CHUNK_SIZE):
                 yield chunk
-    
+
     async def mount_blob(
         self,
         dest_repository: str,
@@ -491,15 +492,15 @@ class RegistryClient:
     ) -> bool:
         """
         Mount a blob from another repository (cross-repo mount).
-        
+
         This is an optimization that avoids re-uploading blobs that
         already exist in another repository on the same registry.
-        
+
         Args:
             dest_repository: Destination repository
             source_repository: Source repository containing the blob
             digest: Blob digest
-            
+
         Returns:
             True if mount succeeded
         """
@@ -508,13 +509,13 @@ class RegistryClient:
             "mount": digest,
             "from": source_repository,
         }
-        
+
         response = await self._client.post(
             url,
             params=params,
             headers=self._get_auth_header(),
         )
-        
+
         if response.status_code == 401:
             await self._handle_auth_challenge(
                 response,
@@ -525,10 +526,10 @@ class RegistryClient:
                 params=params,
                 headers=self._get_auth_header(),
             )
-        
+
         # 201 = mounted successfully, 202 = need to upload
         return response.status_code == 201
-    
+
     async def upload_blob(
         self,
         repository: str,
@@ -538,7 +539,7 @@ class RegistryClient:
     ) -> None:
         """
         Upload a blob in a single request (monolithic upload).
-        
+
         Args:
             repository: Repository name
             digest: Expected blob digest
@@ -547,12 +548,12 @@ class RegistryClient:
         """
         # Start upload session
         url = f"{self.base_url}/{quote(repository, safe='')}/blobs/uploads/"
-        
+
         response = await self._client.post(
             url,
             headers=self._get_auth_header(),
         )
-        
+
         if response.status_code == 401:
             await self._handle_auth_challenge(
                 response,
@@ -562,13 +563,13 @@ class RegistryClient:
                 url,
                 headers=self._get_auth_header(),
             )
-        
+
         if response.status_code not in (200, 202):
             raise ImageTransferError(
                 f"{repository}@{digest}",
                 f"Failed to start upload: {response.status_code}"
             )
-        
+
         # Get upload URL
         upload_url = response.headers.get("Location")
         if not upload_url:
@@ -576,34 +577,34 @@ class RegistryClient:
                 f"{repository}@{digest}",
                 "No upload URL in response"
             )
-        
+
         # Make URL absolute if needed
         if not upload_url.startswith("http"):
             upload_url = urljoin(self.base_url, upload_url)
-        
+
         # Add digest parameter
         separator = "&" if "?" in upload_url else "?"
         upload_url = f"{upload_url}{separator}digest={digest}"
-        
+
         # Upload blob
         headers = self._get_auth_header()
         headers["Content-Type"] = content_type
         headers["Content-Length"] = str(len(data))
-        
+
         response = await self._client.put(
             upload_url,
             content=data,
             headers=headers,
         )
-        
+
         if response.status_code != 201:
             raise ImageTransferError(
                 f"{repository}@{digest}",
                 f"Failed to upload blob: {response.status_code}"
             )
-        
+
         logger.debug(f"Uploaded blob {digest} to {repository}")
-    
+
     async def upload_blob_stream(
         self,
         repository: str,
@@ -613,7 +614,7 @@ class RegistryClient:
     ) -> None:
         """
         Upload a blob using chunked transfer.
-        
+
         Args:
             repository: Repository name
             digest: Expected blob digest
@@ -622,12 +623,12 @@ class RegistryClient:
         """
         # Start upload session
         url = f"{self.base_url}/{quote(repository, safe='')}/blobs/uploads/"
-        
+
         response = await self._client.post(
             url,
             headers=self._get_auth_header(),
         )
-        
+
         if response.status_code == 401:
             await self._handle_auth_challenge(
                 response,
@@ -637,62 +638,62 @@ class RegistryClient:
                 url,
                 headers=self._get_auth_header(),
             )
-        
+
         if response.status_code not in (200, 202):
             raise ImageTransferError(
                 f"{repository}@{digest}",
                 f"Failed to start upload: {response.status_code}"
             )
-        
+
         upload_url = response.headers.get("Location")
         if not upload_url.startswith("http"):
             upload_url = urljoin(self.base_url, upload_url)
-        
+
         # Stream chunks
         offset = 0
         async for chunk in data_stream:
             chunk_size = len(chunk)
-            
+
             headers = self._get_auth_header()
             headers["Content-Type"] = "application/octet-stream"
             headers["Content-Length"] = str(chunk_size)
             headers["Content-Range"] = f"{offset}-{offset + chunk_size - 1}"
-            
+
             response = await self._client.patch(
                 upload_url,
                 content=chunk,
                 headers=headers,
             )
-            
+
             if response.status_code not in (202, 204):
                 raise ImageTransferError(
                     f"{repository}@{digest}",
                     f"Chunk upload failed: {response.status_code}"
                 )
-            
+
             upload_url = response.headers.get("Location", upload_url)
             if not upload_url.startswith("http"):
                 upload_url = urljoin(self.base_url, upload_url)
-            
+
             offset += chunk_size
-        
+
         # Finalize upload
         separator = "&" if "?" in upload_url else "?"
         final_url = f"{upload_url}{separator}digest={digest}"
-        
+
         response = await self._client.put(
             final_url,
             headers=self._get_auth_header(),
         )
-        
+
         if response.status_code != 201:
             raise ImageTransferError(
                 f"{repository}@{digest}",
                 f"Failed to finalize upload: {response.status_code}"
             )
-        
+
         logger.debug(f"Uploaded blob {digest} to {repository}")
-    
+
     async def upload_manifest(
         self,
         repository: str,
@@ -702,27 +703,27 @@ class RegistryClient:
     ) -> str:
         """
         Upload an image manifest.
-        
+
         Args:
             repository: Repository name
             reference: Tag or digest
             manifest: Manifest content
             media_type: Manifest media type
-            
+
         Returns:
             Manifest digest
         """
         url = f"{self.base_url}/{quote(repository, safe='')}/manifests/{reference}"
-        
+
         headers = self._get_auth_header()
         headers["Content-Type"] = media_type
-        
+
         response = await self._client.put(
             url,
             content=manifest,
             headers=headers,
         )
-        
+
         if response.status_code == 401:
             await self._handle_auth_challenge(
                 response,
@@ -733,21 +734,21 @@ class RegistryClient:
                 content=manifest,
                 headers=headers,
             )
-        
+
         if response.status_code not in (200, 201):
             raise ImageTransferError(
                 f"{repository}:{reference}",
                 f"Failed to upload manifest: {response.status_code}"
             )
-        
+
         digest = response.headers.get(
             "Docker-Content-Digest",
             f"sha256:{hashlib.sha256(manifest).hexdigest()}"
         )
-        
+
         logger.debug(f"Uploaded manifest {digest} to {repository}:{reference}")
         return digest
-    
+
     async def copy_image(
         self,
         source_repo: str,
@@ -759,10 +760,10 @@ class RegistryClient:
     ) -> int:
         """
         Copy an image to another registry.
-        
+
         This is the main high-level method for copying images.
         It handles manifest and all layers efficiently.
-        
+
         Args:
             source_repo: Source repository
             source_ref: Source tag/digest
@@ -770,15 +771,15 @@ class RegistryClient:
             dest_repo: Destination repository
             dest_ref: Destination tag
             on_progress: Optional callback for progress updates
-            
+
         Returns:
             Total bytes transferred
         """
         total_bytes = 0
-        
+
         # Get source manifest
         manifest_info, manifest_data = await self.get_manifest(source_repo, source_ref)
-        
+
         # Handle manifest list (multi-arch)
         if manifest_info.media_type in (
             "application/vnd.docker.distribution.manifest.list.v2+json",
@@ -810,28 +811,28 @@ class RegistryClient:
                         "application/vnd.docker.container.image.v1+json"
                     )
                     total_bytes += len(config_data)
-            
+
             # Copy layers
             for layer in manifest_info.layers:
                 layer_digest = layer["digest"]
-                layer_size = layer.get("size", 0)
-                
+                layer.get("size", 0)
+
                 # Check if layer exists
                 if await dest_client.blob_exists(dest_repo, layer_digest):
                     logger.debug(f"Layer {layer_digest} already exists, skipping")
                     continue
-                
+
                 # Try to mount from same registry (optimization)
                 if self.registry == dest_client.registry:
                     if await dest_client.mount_blob(dest_repo, source_repo, layer_digest):
                         logger.debug(f"Mounted layer {layer_digest}")
                         continue
-                
+
                 # Stream copy the layer
                 layer_data = b""
                 async for chunk in self.stream_blob(source_repo, layer_digest):
                     layer_data += chunk
-                
+
                 await dest_client.upload_blob(
                     dest_repo,
                     layer_digest,
@@ -839,10 +840,10 @@ class RegistryClient:
                     layer.get("mediaType", "application/octet-stream")
                 )
                 total_bytes += len(layer_data)
-                
+
                 if on_progress:
                     on_progress(f"Layer {layer_digest[:12]}")
-        
+
         # Upload manifest
         await dest_client.upload_manifest(
             dest_repo,
@@ -851,5 +852,5 @@ class RegistryClient:
             manifest_info.media_type
         )
         total_bytes += len(manifest_data)
-        
+
         return total_bytes
