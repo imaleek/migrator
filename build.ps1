@@ -18,7 +18,7 @@ if (-not (Test-Path $OutputDir)) {
 
 # Build the Docker image
 Write-Host "`n📦 Building Docker image..." -ForegroundColor Yellow
-docker build -t migrator-builder:latest --target builder .
+docker build --no-cache -t migrator-builder:latest --target builder .
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "❌ Docker build failed!" -ForegroundColor Red

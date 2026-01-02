@@ -103,6 +103,15 @@ class RegistryClient:
         "application/vnd.docker.distribution.manifest.list.v2+json",
         "application/vnd.oci.image.manifest.v1+json",
         "application/vnd.oci.image.index.v1+json",
+        # Helm chart types
+        "application/vnd.cncf.helm.config.v1+json",
+    ]
+
+    # Helm chart media types (for OCI-based Helm charts)
+    HELM_CHART_TYPES = [
+        "application/vnd.cncf.helm.config.v1+json",
+        "application/vnd.cncf.helm.chart.content.v1.tar+gzip",
+        "application/vnd.cncf.helm.chart.provenance.v1.prov",
     ]
 
     # Chunk size for uploads (5MB)
@@ -437,6 +446,30 @@ class RegistryClient:
 
         logger.debug(f"Got manifest {digest} for {repository}:{reference}")
         return info, content
+
+    def is_helm_chart(self, manifest_data: dict) -> bool:
+        """
+        Check if a manifest represents a Helm chart.
+
+        Args:
+            manifest_data: Parsed manifest JSON
+
+        Returns:
+            True if the manifest is for a Helm chart
+        """
+        # Check config media type for Helm charts
+        if "config" in manifest_data:
+            config_type = manifest_data["config"].get("mediaType", "")
+            if any(ht in config_type for ht in self.HELM_CHART_TYPES):
+                return True
+
+        # Check layers for Helm chart content
+        for layer in manifest_data.get("layers", []):
+            layer_type = layer.get("mediaType", "")
+            if any(ht in layer_type for ht in self.HELM_CHART_TYPES):
+                return True
+
+        return False
 
     async def blob_exists(self, repository: str, digest: str) -> bool:
         """

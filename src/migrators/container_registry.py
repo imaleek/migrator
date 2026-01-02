@@ -154,18 +154,56 @@ class ContainerRegistryMigrator(BaseMigrator):
         filtered_repos = [r for r in repositories if self._matches_filter(r)]
         logger.info(f"Found {len(filtered_repos)} repositories (filtered from {len(repositories)})")
 
-        # Get tags for each repository
+        # Get tags for each repository and classify as image or chart
         for repo in filtered_repos:
             with self.console.status(f"Scanning {repo}..."):
                 tags = await self._source_client.list_tags(repo)
+                if not tags:
+                    continue
+
+                # Check first tag to determine if this is a Helm chart
+                is_chart = await self._is_helm_chart_repo(repo, tags[0])
+
                 for tag in tags:
-                    image_ref = ImageReference(repository=repo, tag=tag)
-                    self._images.append(image_ref)
-                    discovered.append(("image", image_ref))
+                    if is_chart:
+                        # Extract chart name from repository path
+                        chart_name = repo.split("/")[-1]
+                        chart_ref = ChartReference(
+                            name=chart_name,
+                            version=tag,
+                            repository="/".join(repo.split("/")[:-1]) if "/" in repo else None
+                        )
+                        self._charts.append(chart_ref)
+                        discovered.append(("chart", chart_ref))
+                    else:
+                        image_ref = ImageReference(repository=repo, tag=tag)
+                        self._images.append(image_ref)
+                        discovered.append(("image", image_ref))
 
         self.console.show_discovery_results(len(self._images), len(self._charts))
 
         return discovered
+
+    async def _is_helm_chart_repo(self, repository: str, tag: str) -> bool:
+        """
+        Check if a repository contains Helm charts by inspecting manifest.
+
+        Args:
+            repository: Repository name
+            tag: A sample tag to check
+
+        Returns:
+            True if the repository contains Helm charts
+        """
+        try:
+            manifest_info, manifest_bytes = await self._source_client.get_manifest(
+                repository, tag
+            )
+            manifest_data = __import__("json").loads(manifest_bytes)
+            return self._source_client.is_helm_chart(manifest_data)
+        except Exception as e:
+            logger.debug(f"Could not determine artifact type for {repository}:{tag}: {e}")
+            return False
 
     async def migrate_item(self, item: Any) -> MigrationResult:
         """Migrate a single item (image or chart)."""
