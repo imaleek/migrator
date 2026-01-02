@@ -282,7 +282,7 @@ class RegistryClient:
                 str(e)
             ) from e
 
-    async def list_repositories(self, limit: int = 1000) -> list[str]:
+    async def list_repositories(self, limit: int = 100000) -> list[str]:
         """
         List all repositories in the registry.
 
@@ -342,46 +342,67 @@ class RegistryClient:
         logger.debug(f"Found {len(repositories)} repositories")
         return repositories[:limit]
 
-    async def list_tags(self, repository: str) -> list[str]:
+    async def list_tags(self, repository: str, limit: int = 100000) -> list[str]:
         """
         List all tags for a repository.
 
         Args:
             repository: Repository name
+            limit: Maximum number of tags to return
 
         Returns:
             List of tag names
         """
+        tags = []
         url = f"{self.base_url}/{quote(repository, safe='')}/tags/list"
+        params = {"n": min(limit, 100)}
 
-        response = await self._client.get(
-            url,
-            headers=self._get_auth_header(),
-        )
+        while url and len(tags) < limit:
+            # Ensure URL has protocol (fix for pagination URLs)
+            if url and not url.startswith(("http://", "https://")):
+                protocol = "http" if self.credentials.insecure else "https"
+                url = f"{protocol}://{self.credentials.registry_host}{url}"
 
-        if response.status_code == 401:
-            await self._handle_auth_challenge(
-                response,
-                f"repository:{repository}:pull"
-            )
             response = await self._client.get(
                 url,
+                params=params,
                 headers=self._get_auth_header(),
             )
 
-        if response.status_code == 404:
-            logger.debug(f"Repository not found: {repository}")
-            return []
+            if response.status_code == 401:
+                await self._handle_auth_challenge(
+                    response,
+                    f"repository:{repository}:pull"
+                )
+                continue
 
-        if response.status_code != 200:
-            logger.warning(f"Failed to list tags for {repository}: {response.status_code}")
-            return []
+            if response.status_code == 404:
+                logger.debug(f"Repository not found: {repository}")
+                return []
 
-        data = response.json()
-        tags = data.get("tags") or []
+            if response.status_code != 200:
+                logger.warning(f"Failed to list tags for {repository}: {response.status_code}")
+                break
+
+            data = response.json()
+            new_tags = data.get("tags") or []
+            tags.extend(new_tags)
+
+            # Check for pagination (Link header)
+            link = response.headers.get("Link", "")
+            if "rel=\"next\"" in link:
+                # Extract next URL from Link header
+                match = re.search(r'<([^>]+)>', link)
+                if match:
+                    url = match.group(1)
+                    params = {}  # Pagination URL includes params
+                else:
+                    break
+            else:
+                break
 
         logger.debug(f"Found {len(tags)} tags for {repository}")
-        return tags
+        return tags[:limit]
 
     async def get_manifest(
         self,
