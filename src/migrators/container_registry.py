@@ -99,17 +99,58 @@ class ContainerRegistryMigrator(BaseMigrator):
 
         return True
 
+    def _strip_namespace(self, repository: str, namespace: str | None) -> str:
+        """
+        Remove namespace prefix from repository path.
+
+        Args:
+            repository: Full repository path (e.g., "project/myapp")
+            namespace: Namespace to strip (e.g., "project")
+
+        Returns:
+            Repository without namespace (e.g., "myapp")
+        """
+        if namespace and repository.startswith(f"{namespace}/"):
+            return repository[len(namespace) + 1:]
+        return repository
+
+    def _apply_namespace(self, repository: str, namespace: str | None) -> str:
+        """
+        Add namespace prefix to repository path.
+
+        Args:
+            repository: Repository path (e.g., "myapp")
+            namespace: Namespace to add (e.g., "project")
+
+        Returns:
+            Repository with namespace (e.g., "project/myapp")
+        """
+        if namespace:
+            # Avoid double-prefixing
+            if not repository.startswith(f"{namespace}/"):
+                return f"{namespace}/{repository}"
+        return repository
+
     async def discover(self) -> list[Any]:
         """Discover all images and charts to migrate."""
         self.console.start_discovery()
 
         discovered = []
+        source_prefix = self.config.source.repository_prefix
 
         # Discover images
         with self.console.status("Fetching repository list..."):
             repositories = await self._source_client.list_repositories()
 
-        # Filter repositories
+        # Filter by namespace prefix if set
+        if source_prefix:
+            repositories = [
+                r for r in repositories
+                if r.startswith(f"{source_prefix}/") or r == source_prefix
+            ]
+            logger.info(f"Filtered to {len(repositories)} repositories in namespace '{source_prefix}'")
+
+        # Apply include/exclude pattern filters
         filtered_repos = [r for r in repositories if self._matches_filter(r)]
         logger.info(f"Found {len(filtered_repos)} repositories (filtered from {len(repositories)})")
 
@@ -144,8 +185,21 @@ class ContainerRegistryMigrator(BaseMigrator):
 
     async def _migrate_image(self, image: ImageReference) -> MigrationResult:
         """Migrate a single container image."""
-        source_ref = image.with_registry(self.config.source.registry)
-        dest_ref = image.with_registry(self.config.destination.registry)
+        # Get namespace prefixes
+        source_prefix = self.config.source.repository_prefix
+        dest_prefix = self.config.destination.repository_prefix
+
+        # Source repository is as discovered (includes source namespace if present)
+        source_repo = image.repository
+
+        # For destination, strip source namespace and apply destination namespace
+        # e.g., source "project-a/myapp" with dest namespace "project-b" -> "project-b/myapp"
+        base_repo = self._strip_namespace(source_repo, source_prefix)
+        dest_repo = self._apply_namespace(base_repo, dest_prefix)
+
+        # Build full references for logging
+        source_ref = f"{self.config.source.registry_host}/{source_repo}:{image.tag}"
+        dest_ref = f"{self.config.destination.registry_host}/{dest_repo}:{image.tag}"
         start_time = time.time()
 
         try:
@@ -153,7 +207,7 @@ class ContainerRegistryMigrator(BaseMigrator):
             if self.config.skip_existing:
                 try:
                     manifest, _ = await self._dest_client.get_manifest(
-                        image.repository, image.tag
+                        dest_repo, image.tag
                     )
                     if manifest:
                         logger.debug(f"Image already exists, skipping: {dest_ref}")
@@ -181,10 +235,10 @@ class ContainerRegistryMigrator(BaseMigrator):
 
             # Copy the image
             bytes_transferred = await self._source_client.copy_image(
-                image.repository,
+                source_repo,
                 image.tag,
                 self._dest_client,
-                image.repository,
+                dest_repo,
                 image.tag,
             )
 

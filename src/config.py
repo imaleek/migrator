@@ -25,10 +25,14 @@ class RegistryType(str, Enum):
 class RegistryCredentials(BaseModel):
     """Registry connection credentials."""
 
-    registry: str = Field(..., description="Registry URL (e.g., registry.example.com)")
+    registry: str = Field(..., description="Registry URL (e.g., registry.example.com or registry.example.com/project)")
     username: str = Field(..., description="Registry username")
     password: str = Field(..., description="Registry password or token")
     insecure: bool = Field(default=False, description="Allow insecure HTTP connections")
+    namespace: str | None = Field(
+        default=None,
+        description="Optional namespace/project prefix for repositories (overrides path in registry URL)"
+    )
 
     @field_validator("registry")
     @classmethod
@@ -43,10 +47,57 @@ class RegistryCredentials(BaseModel):
             raise ValueError("Invalid registry URL")
         return v
 
+    @field_validator("namespace")
+    @classmethod
+    def validate_namespace(cls, v: str | None) -> str | None:
+        """Normalize namespace value."""
+        if v is not None:
+            # Remove leading/trailing slashes
+            v = v.strip("/")
+            if not v:
+                return None
+        return v
+
+    @property
+    def registry_host(self) -> str:
+        """
+        Get just the host portion for API calls and authentication.
+
+        Examples:
+            - "harbor.io/project" -> "harbor.io"
+            - "gcr.io" -> "gcr.io"
+            - "us-docker.pkg.dev/my-project/my-repo" -> "us-docker.pkg.dev"
+        """
+        return self.registry.split("/")[0]
+
+    @property
+    def repository_prefix(self) -> str | None:
+        """
+        Get the namespace/project prefix for repositories.
+
+        Priority:
+        1. Explicit namespace field if set
+        2. Path portion of registry URL if present
+        3. None if neither exists
+
+        Examples:
+            - namespace="myns" -> "myns"
+            - registry="harbor.io/project", namespace=None -> "project"
+            - registry="harbor.io", namespace=None -> None
+        """
+        # Explicit namespace takes priority
+        if self.namespace:
+            return self.namespace
+        # Extract from registry URL path
+        parts = self.registry.split("/", 1)
+        if len(parts) > 1 and parts[1]:
+            return parts[1]
+        return None
+
     @property
     def registry_type(self) -> RegistryType:
         """Detect registry type from URL."""
-        registry_lower = self.registry.lower()
+        registry_lower = self.registry_host.lower()
 
         if "docker.io" in registry_lower or "index.docker.io" in registry_lower:
             return RegistryType.DOCKER_HUB
@@ -68,9 +119,14 @@ class RegistryCredentials(BaseModel):
 
     @property
     def api_base_url(self) -> str:
-        """Get the base URL for Registry API v2."""
+        """
+        Get the base URL for Registry API v2.
+
+        Uses only the host portion (not the namespace path) since
+        the Docker Registry API v2 is always at the root.
+        """
         protocol = "http" if self.insecure else "https"
-        return f"{protocol}://{self.registry}/v2"
+        return f"{protocol}://{self.registry_host}/v2"
 
     def model_post_init(self, __context) -> None:
         """Post-initialization processing."""

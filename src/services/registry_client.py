@@ -129,7 +129,13 @@ class RegistryClient:
     @property
     def base_url(self) -> str:
         """Get the base URL for API requests."""
-        return self.credentials.api_base_url
+        url = self.credentials.api_base_url
+        # Defensive check: ensure URL has protocol
+        if not url.startswith(("http://", "https://")):
+            protocol = "http" if self.credentials.insecure else "https"
+            url = f"{protocol}://{self.credentials.registry_host}/v2"
+            logger.warning(f"Fixed base_url missing protocol: {url}")
+        return url
 
     @property
     def registry(self) -> str:
@@ -281,7 +287,16 @@ class RegistryClient:
         url = f"{self.base_url}/_catalog"
         params = {"n": min(limit, 100)}
 
+        # Debug: Log the URL being used
+        logger.debug(f"Listing repositories from: {url}")
+
         while url and len(repositories) < limit:
+            # Ensure URL has protocol (fix for pagination URLs)
+            if url and not url.startswith(("http://", "https://")):
+                protocol = "http" if self.credentials.insecure else "https"
+                url = f"{protocol}://{self.credentials.registry_host}{url}"
+                logger.debug(f"Fixed URL with protocol: {url}")
+
             response = await self._client.get(
                 url,
                 params=params,

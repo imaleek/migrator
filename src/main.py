@@ -91,7 +91,7 @@ def migrate_container_registry(
         ...,
         "--source-registry",
         "-sr",
-        help="Source registry URL (e.g., source.registry.io)",
+        help="Source registry URL (e.g., source.registry.io or source.registry.io/project)",
         rich_help_panel="Source Registry",
     ),
     source_user: str = typer.Option(
@@ -115,13 +115,20 @@ def migrate_container_registry(
         help="Allow insecure HTTP connection to source",
         rich_help_panel="Source Registry",
     ),
+    source_namespace: str | None = typer.Option(
+        None,
+        "--source-namespace",
+        "-sn",
+        help="Source namespace/project prefix (overrides path in registry URL)",
+        rich_help_panel="Source Registry",
+    ),
 
     # Destination registry options
     destination_registry: str = typer.Option(
         ...,
         "--destination-registry",
         "-dr",
-        help="Destination registry URL (e.g., dest.registry.io)",
+        help="Destination registry URL (e.g., dest.registry.io or dest.registry.io/project)",
         rich_help_panel="Destination Registry",
     ),
     destination_user: str = typer.Option(
@@ -143,6 +150,13 @@ def migrate_container_registry(
         False,
         "--destination-insecure",
         help="Allow insecure HTTP connection to destination",
+        rich_help_panel="Destination Registry",
+    ),
+    destination_namespace: str | None = typer.Option(
+        None,
+        "--destination-namespace",
+        "-dn",
+        help="Destination namespace/project prefix (overrides path in registry URL)",
         rich_help_panel="Destination Registry",
     ),
 
@@ -261,6 +275,7 @@ def migrate_container_registry(
             username=source_user,
             password=source_password,
             insecure=source_insecure,
+            namespace=source_namespace,
         )
 
         dest_creds = RegistryCredentials(
@@ -268,6 +283,7 @@ def migrate_container_registry(
             username=destination_user,
             password=destination_password,
             insecure=destination_insecure,
+            namespace=destination_namespace,
         )
 
         config = MigrationConfig(
