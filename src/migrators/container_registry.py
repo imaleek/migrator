@@ -422,14 +422,7 @@ class ContainerRegistryMigrator(BaseMigrator):
         start_time = time.time()
 
         try:
-            # Check if helm clients are initialized
-            if not self._source_helm or not self._dest_helm:
-                raise HelmChartError(
-                    chart.full_reference,
-                    "copy",
-                    "Helm clients not initialized"
-                )
-            
+            # In dry run mode, we don't need initialized clients
             if self.config.dry_run:
                 logger.info(f"[DRY RUN] Would migrate chart: {source_ref} -> {dest_ref}")
                 self.console.show_item_success(chart.full_reference)
@@ -438,6 +431,14 @@ class ContainerRegistryMigrator(BaseMigrator):
                     destination=dest_ref,
                     success=True,
                     duration_seconds=time.time() - start_time,
+                )
+
+            # Check if helm clients are initialized
+            if not self._source_helm or not self._dest_helm:
+                raise HelmChartError(
+                    chart.full_reference,
+                    "copy",
+                    "Helm clients not initialized"
                 )
 
             # Copy the chart with destination namespace

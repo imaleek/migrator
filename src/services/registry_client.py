@@ -14,6 +14,7 @@ Supports:
 - GitHub Container Registry (GHCR)
 - Any OCI-compliant registry
 """
+import asyncio
 import base64
 import hashlib
 import json
@@ -29,6 +30,7 @@ from tenacity import (
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
+    RetryError,
 )
 
 from config import RegistryCredentials
@@ -57,6 +59,13 @@ class ImageTransferError(MigratorError):
     def __init__(self, image: str, message: str, details: str | None = None):
         self.image = image
         super().__init__(f"Failed to transfer {image}: {message}", details)
+
+
+class TransientRegistryError(MigratorError):
+    """Raised for transient registry errors that should be retried (5xx errors)."""
+    def __init__(self, operation: str, status_code: int, details: str | None = None):
+        self.status_code = status_code
+        super().__init__(f"{operation} failed with status {status_code}", details)
 
 
 @dataclass
@@ -116,6 +125,28 @@ class RegistryClient:
 
     # Chunk size for uploads (5MB)
     CHUNK_SIZE = 5 * 1024 * 1024
+
+    # Manifest format conversion mappings (OCI <-> Docker)
+    MANIFEST_CONVERSIONS = {
+        # OCI to Docker
+        "application/vnd.oci.image.manifest.v1+json": "application/vnd.docker.distribution.manifest.v2+json",
+        "application/vnd.oci.image.index.v1+json": "application/vnd.docker.distribution.manifest.list.v2+json",
+        # Docker to OCI
+        "application/vnd.docker.distribution.manifest.v2+json": "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json": "application/vnd.oci.image.index.v1+json",
+    }
+
+    # Layer media type conversions
+    LAYER_CONVERSIONS = {
+        "application/vnd.oci.image.layer.v1.tar+gzip": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+        "application/vnd.docker.image.rootfs.diff.tar.gzip": "application/vnd.oci.image.layer.v1.tar+gzip",
+    }
+
+    # Config media type conversions
+    CONFIG_CONVERSIONS = {
+        "application/vnd.oci.image.config.v1+json": "application/vnd.docker.container.image.v1+json",
+        "application/vnd.docker.container.image.v1+json": "application/vnd.oci.image.config.v1+json",
+    }
 
     def __init__(
         self,
@@ -516,6 +547,67 @@ class RegistryClient:
 
         return False
 
+    def convert_manifest(
+        self,
+        manifest_bytes: bytes,
+        source_media_type: str,
+        target_media_type: str
+    ) -> tuple[bytes, str]:
+        """
+        Convert manifest between OCI and Docker formats.
+
+        This is a best-effort conversion that updates media types in the manifest.
+        The binary content of blobs remains unchanged.
+
+        Args:
+            manifest_bytes: Original manifest content
+            source_media_type: Original manifest media type
+            target_media_type: Desired manifest media type
+
+        Returns:
+            Tuple of (converted_manifest_bytes, new_media_type)
+        """
+        try:
+            manifest = json.loads(manifest_bytes)
+            
+            # Determine conversion direction
+            to_docker = "docker" in target_media_type.lower()
+            
+            # Update schemaVersion if needed
+            if "schemaVersion" not in manifest:
+                manifest["schemaVersion"] = 2
+            
+            # Convert config media type
+            if "config" in manifest and "mediaType" in manifest["config"]:
+                old_config_type = manifest["config"]["mediaType"]
+                if old_config_type in self.CONFIG_CONVERSIONS:
+                    manifest["config"]["mediaType"] = self.CONFIG_CONVERSIONS[old_config_type]
+            
+            # Convert layer media types
+            if "layers" in manifest:
+                for layer in manifest["layers"]:
+                    if "mediaType" in layer:
+                        old_layer_type = layer["mediaType"]
+                        if old_layer_type in self.LAYER_CONVERSIONS:
+                            layer["mediaType"] = self.LAYER_CONVERSIONS[old_layer_type]
+            
+            # Convert manifest list/index media types
+            if "manifests" in manifest:
+                for sub_manifest in manifest["manifests"]:
+                    if "mediaType" in sub_manifest:
+                        old_type = sub_manifest["mediaType"]
+                        if old_type in self.MANIFEST_CONVERSIONS:
+                            sub_manifest["mediaType"] = self.MANIFEST_CONVERSIONS[old_type]
+            
+            converted_bytes = json.dumps(manifest, separators=(",", ":")).encode("utf-8")
+            logger.debug(f"Converted manifest from {source_media_type} to {target_media_type}")
+            return converted_bytes, target_media_type
+            
+        except Exception as e:
+            logger.warning(f"Manifest conversion failed: {e}, using original")
+            return manifest_bytes, source_media_type
+
+
     async def blob_exists(self, repository: str, digest: str) -> bool:
         """
         Check if a blob exists in the repository.
@@ -633,12 +725,55 @@ class RegistryClient:
         """
         Upload a blob in a single request (monolithic upload).
 
+        Includes retry logic for transient 5xx errors.
+
         Args:
             repository: Repository name
             digest: Expected blob digest
             data: Blob content
             content_type: MIME type
         """
+        max_retries = 3
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                await self._upload_blob_attempt(repository, digest, data, content_type)
+                return  # Success
+            except TransientRegistryError as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    delay = 2 ** (attempt + 1)  # Exponential backoff: 2, 4, 8 seconds
+                    logger.warning(
+                        f"Blob upload failed with {e.status_code}, "
+                        f"retrying in {delay}s (attempt {attempt + 1}/{max_retries})"
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    raise ImageTransferError(
+                        f"{repository}@{digest}",
+                        f"Failed to upload blob after {max_retries} attempts: {e.status_code}"
+                    ) from e
+            except ImageTransferError:
+                raise  # Don't retry client errors (4xx)
+        
+        # Should not reach here, but just in case
+        if last_error:
+            raise ImageTransferError(
+                f"{repository}@{digest}",
+                f"Failed to upload blob: {last_error}"
+            )
+
+    async def _upload_blob_attempt(
+        self,
+        repository: str,
+        digest: str,
+        data: bytes,
+        content_type: str
+    ) -> None:
+        """Single attempt to upload a blob."""
+        import asyncio  # Local import to avoid issues
+        
         # Start upload session
         url = f"{self.base_url}/{quote(repository, safe='/')}/blobs/uploads/"
 
@@ -657,10 +792,19 @@ class RegistryClient:
                 headers=self._get_auth_header(),
             )
 
+        if response.status_code >= 500:
+            raise TransientRegistryError(
+                f"Start upload for {repository}@{digest}",
+                response.status_code,
+                response.text[:500] if response.text else None
+            )
+
         if response.status_code not in (200, 202):
+            error_body = response.text[:500] if response.text else "No response body"
             raise ImageTransferError(
                 f"{repository}@{digest}",
-                f"Failed to start upload: {response.status_code}"
+                f"Failed to start upload: {response.status_code}",
+                error_body
             )
 
         # Get upload URL
@@ -705,10 +849,24 @@ class RegistryClient:
                 headers=headers,
             )
 
+        # Handle transient errors (5xx)
+        if response.status_code >= 500:
+            raise TransientRegistryError(
+                f"Upload blob {repository}@{digest}",
+                response.status_code,
+                response.text[:500] if response.text else None
+            )
+
         if response.status_code != 201:
+            error_body = response.text[:500] if response.text else "No response body"
+            logger.error(
+                f"Blob upload failed for {repository}@{digest}: "
+                f"status={response.status_code}, body={error_body}"
+            )
             raise ImageTransferError(
                 f"{repository}@{digest}",
-                f"Failed to upload blob: {response.status_code}"
+                f"Failed to upload blob: {response.status_code}",
+                error_body
             )
 
         logger.debug(f"Uploaded blob {digest} to {repository}")
@@ -834,20 +992,80 @@ class RegistryClient:
         repository: str,
         reference: str,
         manifest: bytes,
-        media_type: str
+        media_type: str,
+        source_client: "RegistryClient" = None
     ) -> str:
         """
-        Upload an image manifest.
+        Upload an image manifest with retry and format conversion support.
+
+        If the initial upload fails with 400 (Bad Request), this method will
+        attempt to convert the manifest to an alternative format and retry.
 
         Args:
             repository: Repository name
             reference: Tag or digest
             manifest: Manifest content
             media_type: Manifest media type
+            source_client: Optional source client for format conversion
 
         Returns:
             Manifest digest
         """
+        max_retries = 3
+        current_manifest = manifest
+        current_media_type = media_type
+        conversion_attempted = False
+        
+        for attempt in range(max_retries):
+            try:
+                return await self._upload_manifest_attempt(
+                    repository, reference, current_manifest, current_media_type
+                )
+            except TransientRegistryError as e:
+                if attempt < max_retries - 1:
+                    delay = 2 ** (attempt + 1)
+                    logger.warning(
+                        f"Manifest upload failed with {e.status_code}, "
+                        f"retrying in {delay}s (attempt {attempt + 1}/{max_retries})"
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    raise ImageTransferError(
+                        f"{repository}:{reference}",
+                        f"Failed to upload manifest after {max_retries} attempts: {e.status_code}"
+                    ) from e
+            except ImageTransferError as e:
+                # Check if this is a 400 error and we haven't tried conversion yet
+                if "400" in str(e) and not conversion_attempted and current_media_type in self.MANIFEST_CONVERSIONS:
+                    conversion_attempted = True
+                    target_media_type = self.MANIFEST_CONVERSIONS[current_media_type]
+                    logger.info(
+                        f"Manifest rejected (400), attempting format conversion: "
+                        f"{current_media_type} -> {target_media_type}"
+                    )
+                    # Use source client if provided, otherwise use self
+                    converter = source_client or self
+                    current_manifest, current_media_type = converter.convert_manifest(
+                        manifest, media_type, target_media_type
+                    )
+                    # Retry with converted manifest (don't count as retry attempt)
+                    continue
+                raise
+        
+        # Should not reach here
+        raise ImageTransferError(
+            f"{repository}:{reference}",
+            "Failed to upload manifest: unknown error"
+        )
+
+    async def _upload_manifest_attempt(
+        self,
+        repository: str,
+        reference: str,
+        manifest: bytes,
+        media_type: str
+    ) -> str:
+        """Single attempt to upload a manifest."""
         url = f"{self.base_url}/{quote(repository, safe='/')}/manifests/{reference}"
 
         headers = self._get_auth_header()
@@ -873,10 +1091,24 @@ class RegistryClient:
                 headers=headers,
             )
 
+        # Handle transient errors (5xx)
+        if response.status_code >= 500:
+            raise TransientRegistryError(
+                f"Upload manifest {repository}:{reference}",
+                response.status_code,
+                response.text[:500] if response.text else None
+            )
+
         if response.status_code not in (200, 201):
+            error_body = response.text[:500] if response.text else "No response body"
+            logger.error(
+                f"Manifest upload failed for {repository}:{reference}: "
+                f"status={response.status_code}, media_type={media_type}, body={error_body}"
+            )
             raise ImageTransferError(
                 f"{repository}:{reference}",
-                f"Failed to upload manifest: {response.status_code}"
+                f"Failed to upload manifest: {response.status_code}",
+                error_body
             )
 
         digest = response.headers.get(
@@ -982,12 +1214,13 @@ class RegistryClient:
                 if on_progress:
                     on_progress(f"Layer {layer_digest[:12]}")
 
-        # Upload manifest
+        # Upload manifest (pass source client for format conversion if needed)
         await dest_client.upload_manifest(
             dest_repo,
             dest_ref,
             manifest_data,
-            manifest_info.media_type
+            manifest_info.media_type,
+            source_client=self
         )
         total_bytes += len(manifest_data)
 
