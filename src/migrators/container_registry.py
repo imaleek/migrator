@@ -7,6 +7,7 @@ between any OCI-compliant registries.
 import asyncio
 import re
 import time
+from pathlib import Path
 from typing import Any
 
 from config import (
@@ -18,7 +19,9 @@ from config import (
 )
 from console import MigrationConsole
 from migrators import BaseMigrator
+from services.blob_cache import BlobCache
 from services.helm_client import HelmChartError, HelmClient
+from services.migration_state import MigrationState
 from services.registry_client import ImageTransferError, RegistryClient, RegistryConnectionError
 from utilities.logger import get_logger
 
@@ -46,6 +49,9 @@ class ContainerRegistryMigrator(BaseMigrator):
         self._dest_helm: HelmClient | None = None
         self._images: list[ImageReference] = []
         self._charts: list[ChartReference] = []
+        self._state: MigrationState | None = None
+        self._blob_cache: BlobCache | None = None
+        self._checkpoint_counter: int = 0
 
     @property
     def name(self) -> str:
@@ -360,13 +366,15 @@ class ContainerRegistryMigrator(BaseMigrator):
                     duration_seconds=time.time() - start_time,
                 )
 
-            # Copy the image
+            # Copy the image with layer concurrency and blob cache
             bytes_transferred = await self._source_client.copy_image(
                 source_repo,
                 image.tag,
                 self._dest_client,
                 dest_repo,
                 image.tag,
+                layer_concurrency=self.config.layer_concurrency,
+                blob_cache=self._blob_cache,
             )
 
             duration = time.time() - start_time
@@ -483,14 +491,54 @@ class ContainerRegistryMigrator(BaseMigrator):
         items: list[tuple[str, Any]],
         progress_task
     ) -> list[MigrationResult]:
-        """Migrate a batch of items with parallelism."""
+        """Migrate a batch of items with parallelism and checkpoint saving."""
         semaphore = asyncio.Semaphore(self.config.parallel_jobs)
+        last_checkpoint_time = time.time()
+        checkpoint_lock = asyncio.Lock()
 
         async def migrate_with_semaphore(item):
+            nonlocal last_checkpoint_time
+            
+            item_type, ref = item
+            ref_key = ref.full_reference if hasattr(ref, 'full_reference') else str(ref)
+            
+            # Skip if already processed (resume support)
+            if self._state and self._state.is_item_processed(item_type, ref_key):
+                progress_task.advance(1)
+                return MigrationResult(
+                    source=ref_key,
+                    destination="",
+                    success=True,
+                    skipped=True,
+                )
+            
             async with semaphore:
                 result = await self.migrate_item(item)
                 self.add_result(result)
                 progress_task.advance(1)
+                
+                # Update state
+                if self._state:
+                    if result.success:
+                        if result.skipped:
+                            self._state.mark_skipped(item_type, ref_key)
+                        else:
+                            self._state.mark_completed(item_type, ref_key)
+                    else:
+                        self._state.mark_failed(item_type, ref_key, result.error or "Unknown error")
+                    
+                    # Checkpoint saving (time-based or count-based)
+                    self._checkpoint_counter += 1
+                    async with checkpoint_lock:
+                        should_checkpoint = (
+                            self._checkpoint_counter >= self.config.checkpoint_interval or
+                            time.time() - last_checkpoint_time > 30  # 30 seconds
+                        )
+                        if should_checkpoint:
+                            await self._state.save()
+                            self._checkpoint_counter = 0
+                            last_checkpoint_time = time.time()
+                
                 return result
 
         tasks = [migrate_with_semaphore(item) for item in items]
@@ -501,19 +549,28 @@ class ContainerRegistryMigrator(BaseMigrator):
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 item_type, ref = items[i]
-                final_results.append(MigrationResult(
-                    source=str(ref),
+                ref_key = ref.full_reference if hasattr(ref, 'full_reference') else str(ref)
+                error_result = MigrationResult(
+                    source=ref_key,
                     destination="",
                     success=False,
                     error=str(result),
-                ))
+                )
+                final_results.append(error_result)
+                # Update state for exceptions
+                if self._state:
+                    self._state.mark_failed(item_type, ref_key, str(result))
             else:
                 final_results.append(result)
+
+        # Final checkpoint save
+        if self._state:
+            await self._state.save()
 
         return final_results
 
     async def run(self) -> MigrationSummary:
-        """Execute the complete migration."""
+        """Execute the complete migration with resume capability."""
         start_time = time.time()
 
         self.log_start()
@@ -526,6 +583,31 @@ class ContainerRegistryMigrator(BaseMigrator):
         )
 
         try:
+            # Initialize state persistence (for resume capability)
+            if self.config.resume and not self.config.dry_run:
+                state_dir = Path(self.config.state_dir)
+                self._state = await MigrationState.load_or_create(
+                    source_registry=self.config.source.registry_host,
+                    dest_registry=self.config.destination.registry_host,
+                    source_namespace=self.config.source.repository_prefix,
+                    dest_namespace=self.config.destination.repository_prefix,
+                    state_dir=state_dir,
+                    resume=self.config.resume,
+                )
+                
+                # Initialize blob cache using state
+                self._blob_cache = BlobCache(self._state)
+                
+                # Check if resuming
+                processed, total = self._state.progress
+                if processed > 0 and total > 0:
+                    self.console.show_info(
+                        f"Resuming migration: {processed}/{total} items already processed"
+                    )
+            else:
+                # No state persistence for dry run, but still use blob cache
+                self._blob_cache = BlobCache()
+
             # Validate connections
             if not await self.validate_connection():
                 raise RegistryConnectionError(
@@ -540,11 +622,27 @@ class ContainerRegistryMigrator(BaseMigrator):
                 self.console.show_warning("No items found to migrate")
                 return self.finalize_summary(start_time)
 
+            # Update state with total discovered
+            if self._state:
+                self._state.set_total_discovered(len(items))
+                await self._state.save()
+
             # Confirm migration (unless dry run)
             if not self.config.dry_run:
-                total = len(items)
-                if total > 10 and not self.console.confirm(
-                    f"Migrate {total} items? This may take a while."
+                # Calculate unprocessed items for confirmation
+                if self._state:
+                    unprocessed = sum(
+                        1 for item_type, ref in items
+                        if not self._state.is_item_processed(
+                            item_type,
+                            ref.full_reference if hasattr(ref, 'full_reference') else str(ref)
+                        )
+                    )
+                else:
+                    unprocessed = len(items)
+                
+                if unprocessed > 10 and not self.console.confirm(
+                    f"Migrate {unprocessed} items? This may take a while."
                 ):
                     self.console.show_info("Migration cancelled by user")
                     return self.finalize_summary(start_time)
@@ -571,8 +669,17 @@ class ContainerRegistryMigrator(BaseMigrator):
             summary = self.finalize_summary(start_time)
             self.console.show_summary(summary)
 
+            # Log blob cache stats
+            if self._blob_cache:
+                self._blob_cache.log_stats()
+
             if self.config.dry_run:
                 self.console.show_dry_run_notice()
+
+            # Clean up state file on successful completion
+            if self._state and summary.failed == 0:
+                await self._state.cleanup()
+                logger.info("Migration completed successfully, state file cleaned up")
 
             self.log_complete(summary)
             return summary
@@ -580,6 +687,12 @@ class ContainerRegistryMigrator(BaseMigrator):
         except Exception as e:
             logger.exception("Migration failed")
             self.console.show_error("Migration Failed", str(e))
+            
+            # Save state on failure for resume
+            if self._state:
+                await self._state.save()
+                logger.info(f"State saved for resume. Run same command to continue.")
+            
             return self.finalize_summary(start_time)
 
         finally:

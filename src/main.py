@@ -218,6 +218,28 @@ def migrate_container_registry(
         help="Enable debug logging",
         rich_help_panel="Output",
     ),
+    # Resume and performance options
+    resume: bool = typer.Option(
+        True,
+        "--resume/--no-resume",
+        help="Resume previous incomplete migration if found",
+        rich_help_panel="Performance",
+    ),
+    state_dir: str = typer.Option(
+        ".migrator-state",
+        "--state-dir",
+        help="Directory for state files (for resume capability)",
+        rich_help_panel="Performance",
+    ),
+    layer_concurrency: int = typer.Option(
+        3,
+        "--layer-concurrency",
+        "-lc",
+        min=1,
+        max=10,
+        help="Number of parallel layer transfers per image",
+        rich_help_panel="Performance",
+    ),
 ):
     """
     🐳 [bold]Migrate container images and Helm charts between registries.[/bold]
@@ -231,6 +253,7 @@ def migrate_container_registry(
     • Skip existing images to resume interrupted migrations
     • Pattern-based filtering for selective migration
     • Support for any OCI-compliant registry
+    • Resume capability with checkpoint saving
 
     [bold yellow]Examples:[/bold yellow]
 
@@ -301,6 +324,9 @@ def migrate_container_registry(
             include_pattern=include,
             exclude_pattern=exclude,
             skip_charts=skip_charts,
+            resume=resume,
+            state_dir=state_dir,
+            layer_concurrency=layer_concurrency,
         )
 
     except ValueError as e:

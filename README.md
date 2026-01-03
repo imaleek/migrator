@@ -13,7 +13,9 @@
 
 - 🐳 **Container Registry Migration** - Migrate images and Helm charts between registries
 - ⚡ **High Performance** - Direct HTTP API v2 transfers (no Docker daemon required)
-- 🔄 **Parallel Processing** - Configurable parallel jobs for maximum speed
+- 🔄 **Parallel Processing** - Configurable parallel jobs and layer-level concurrency
+- 🔁 **Resume Capability** - Continue interrupted migrations from checkpoint
+- 💾 **Smart Caching** - Blob cache reduces redundant checks for shared layers
 - 📊 **Beautiful CLI** - Animated progress bars, spinners, and summary reports
 - 🎯 **Flexible Filtering** - Include/exclude patterns for selective migration
 - 🔒 **Universal Registry Support** - Works with any OCI-compliant registry
@@ -93,6 +95,27 @@ migrator migrate container-registry \
     --destination-user user \
     --destination-password pass \
     --dry-run
+
+# Resume an interrupted migration (automatic)
+migrator migrate container-registry \
+    --source-registry source.registry.io \
+    --source-user user \
+    --source-password pass \
+    --destination-registry dest.registry.io \
+    --destination-user user \
+    --destination-password pass
+# Will automatically resume from last checkpoint if interrupted
+
+# High performance with increased parallelism
+migrator migrate container-registry \
+    --source-registry source.registry.io \
+    --source-user user \
+    --source-password pass \
+    --destination-registry dest.registry.io \
+    --destination-user user \
+    --destination-password pass \
+    --parallel 10 \
+    --layer-concurrency 5
 ```
 
 ### Command Options
@@ -123,6 +146,11 @@ Options:
     --exclude, -e             Regex to exclude repositories
     --skip-charts             Skip Helm chart migration (images only)
 
+  Performance:
+    --resume/--no-resume      Resume from checkpoint (default: enabled)
+    --state-dir PATH          State file directory (default: .migrator-state)
+    --layer-concurrency, -lc  Parallel layer transfers per image (1-10, default: 3)
+
   Output:
     --verbose, -v             Enable verbose output
     --debug                   Enable debug logging
@@ -144,13 +172,14 @@ migrator/
 │   │   └── container_registry.py  # Container registry migrator
 │   ├── services/
 │   │   ├── registry_client.py     # Docker Registry API v2 client
-│   │   └── helm_client.py         # Helm OCI registry client
-│   └── shared/
+│   │   ├── helm_client.py         # Helm OCI registry client
+│   │   ├── migration_state.py     # State persistence for resume
+│   │   └── blob_cache.py          # Blob caching service
+│   └── utilities/
 │       ├── exceptions.py          # Custom exception hierarchy
-│       ├── logger/                # Logging utilities
-│       ├── services/              # Base service classes
-│       └── utilities/             # Common utilities
-├── tests/                         # Test suite
+│       ├── logger.py              # Logging utilities
+│       └── decorators.py          # Common decorators
+├── tests/                         # Test suite (211+ tests)
 ├── pyproject.toml                 # Project configuration
 └── README.md
 ```
