@@ -59,7 +59,7 @@ class ContainerRegistryMigrator(BaseMigrator):
         """Validate connectivity to both registries."""
         self.console.show_info("Validating registry connections...")
 
-        # Initialize clients
+        # Initialize registry clients
         self._source_client = RegistryClient(self.config.source)
         self._dest_client = RegistryClient(self.config.destination)
 
@@ -69,17 +69,31 @@ class ContainerRegistryMigrator(BaseMigrator):
         # Check connectivity
         try:
             await self._source_client.check_connectivity()
-            logger.info(f"Source registry connected: {self.config.source.registry}")
         except RegistryConnectionError as e:
             self.console.show_error("Source Registry Error", str(e))
             return False
 
         try:
             await self._dest_client.check_connectivity()
-            logger.info(f"Destination registry connected: {self.config.destination.registry}")
         except RegistryConnectionError as e:
             self.console.show_error("Destination Registry Error", str(e))
             return False
+
+        # Initialize Helm clients for chart migration
+        self._source_helm = HelmClient(self.config.source)
+        self._dest_helm = HelmClient(self.config.destination)
+        
+        try:
+            await self._source_helm.initialize()
+            await self._source_helm.login()
+        except Exception as e:
+            logger.warning(f"Source Helm client init failed (charts may not migrate): {e}")
+        
+        try:
+            await self._dest_helm.initialize()
+            await self._dest_helm.login()
+        except Exception as e:
+            logger.warning(f"Destination Helm client init failed (charts may not migrate): {e}")
 
         return True
 
@@ -142,6 +156,8 @@ class ContainerRegistryMigrator(BaseMigrator):
         with self.console.status("Fetching repository list..."):
             repositories = await self._source_client.list_repositories()
 
+        total_from_registry = len(repositories)
+
         # Filter by namespace prefix if set
         if source_prefix:
             repositories = [
@@ -152,33 +168,89 @@ class ContainerRegistryMigrator(BaseMigrator):
 
         # Apply include/exclude pattern filters
         filtered_repos = [r for r in repositories if self._matches_filter(r)]
-        logger.info(f"Found {len(filtered_repos)} repositories (filtered from {len(repositories)})")
+        
+        if len(filtered_repos) != total_from_registry:
+            logger.info(f"Scanning {len(filtered_repos)} repositories (filtered from {total_from_registry})")
+        else:
+            logger.info(f"Scanning {len(filtered_repos)} repositories")
 
-        # Get tags for each repository and classify as image or chart
-        for repo in filtered_repos:
-            with self.console.status(f"Scanning {repo}..."):
-                tags = await self._source_client.list_tags(repo)
-                if not tags:
-                    continue
+        # Higher concurrency for scanning - registry APIs can handle more parallel requests
+        scan_concurrency = min(self.config.parallel_jobs * 5, 50)  # Up to 50 concurrent scans
+        semaphore = asyncio.Semaphore(scan_concurrency)
+        
+        # Progress counter
+        scanned_count = 0
+        total_repos = len(filtered_repos)
+        failed_count = 0
 
-                # Check first tag to determine if this is a Helm chart
-                is_chart = await self._is_helm_chart_repo(repo, tags[0])
+        async def scan_repository(repo: str) -> list[tuple[str, Any]]:
+            """Scan a single repository for tags and classify items."""
+            nonlocal scanned_count, failed_count
+            async with semaphore:
+                try:
+                    tags = await self._source_client.list_tags(repo)
+                    if not tags:
+                        scanned_count += 1
+                        return []
 
-                for tag in tags:
-                    if is_chart:
-                        # Extract chart name from repository path
-                        chart_name = repo.split("/")[-1]
-                        chart_ref = ChartReference(
-                            name=chart_name,
-                            version=tag,
-                            repository="/".join(repo.split("/")[:-1]) if "/" in repo else None
-                        )
-                        self._charts.append(chart_ref)
-                        discovered.append(("chart", chart_ref))
-                    else:
-                        image_ref = ImageReference(repository=repo, tag=tag)
-                        self._images.append(image_ref)
-                        discovered.append(("image", image_ref))
+                    # Always check if this is a Helm chart repository
+                    is_chart = await self._is_helm_chart_repo(repo, tags[0])
+                    
+                    # If skip_charts is enabled and this is a chart, skip entirely
+                    if is_chart and self.config.skip_charts:
+                        scanned_count += 1
+                        logger.debug(f"Skipping Helm chart repository: {repo}")
+                        return []
+
+                    items = []
+                    for tag in tags:
+                        if is_chart:
+                            # Extract chart name from repository path
+                            chart_name = repo.split("/")[-1]
+                            chart_ref = ChartReference(
+                                name=chart_name,
+                                version=tag,
+                                repository="/".join(repo.split("/")[:-1]) if "/" in repo else None
+                            )
+                            items.append(("chart", chart_ref))
+                        else:
+                            image_ref = ImageReference(repository=repo, tag=tag)
+                            items.append(("image", image_ref))
+                    
+                    scanned_count += 1
+                    # Log progress every 20 repositories
+                    if scanned_count % 20 == 0:
+                        logger.info(f"Scanned {scanned_count}/{total_repos} repositories...")
+                    
+                    return items
+                except Exception as e:
+                    scanned_count += 1
+                    failed_count += 1
+                    logger.debug(f"Failed to scan repository {repo}: {e}")
+                    return []
+
+        # Scan all repositories in parallel with progress indication
+        with self.console.status(f"Scanning {total_repos} repositories (concurrency: {scan_concurrency})..."):
+            scan_tasks = [scan_repository(repo) for repo in filtered_repos]
+            results = await asyncio.gather(*scan_tasks, return_exceptions=True)
+
+        # Collect results
+        for result in results:
+            if isinstance(result, Exception):
+                logger.debug(f"Repository scan failed: {result}")
+                continue
+            for item_type, ref in result:
+                if item_type == "chart":
+                    self._charts.append(ref)
+                else:
+                    self._images.append(ref)
+                discovered.append((item_type, ref))
+
+        # Log scan summary
+        if failed_count > 0:
+            logger.info(f"Scan complete: {len(discovered)} items found, {failed_count} repositories failed")
+        else:
+            logger.info(f"Scan complete: {len(discovered)} items found")
 
         self.console.show_discovery_results(len(self._images), len(self._charts))
 
@@ -317,11 +389,30 @@ class ContainerRegistryMigrator(BaseMigrator):
 
     async def _migrate_chart(self, chart: ChartReference) -> MigrationResult:
         """Migrate a single Helm chart."""
+        # Build source and destination references
+        source_prefix = self.config.source.repository_prefix
+        dest_prefix = self.config.destination.repository_prefix
+        
         source_ref = f"{self.config.source.registry}/{chart.full_reference}"
-        dest_ref = f"{self.config.destination.registry}/{chart.full_reference}"
+        
+        # Apply destination namespace to the chart reference
+        if dest_prefix:
+            dest_chart_ref = f"{dest_prefix}/{chart.name}:{chart.version}"
+        else:
+            dest_chart_ref = f"{chart.name}:{chart.version}"
+        dest_ref = f"{self.config.destination.registry}/{dest_chart_ref}"
+        
         start_time = time.time()
 
         try:
+            # Check if helm clients are initialized
+            if not self._source_helm or not self._dest_helm:
+                raise HelmChartError(
+                    chart.full_reference,
+                    "copy",
+                    "Helm clients not initialized"
+                )
+            
             if self.config.dry_run:
                 logger.info(f"[DRY RUN] Would migrate chart: {source_ref} -> {dest_ref}")
                 self.console.show_item_success(chart.full_reference)
@@ -332,11 +423,11 @@ class ContainerRegistryMigrator(BaseMigrator):
                     duration_seconds=time.time() - start_time,
                 )
 
-            # Copy the chart
+            # Copy the chart with destination namespace
             bytes_transferred = await self._source_helm.copy_chart(
                 chart,
                 self._dest_helm,
-                chart.repository,
+                dest_prefix,  # Use destination namespace
             )
 
             duration = time.time() - start_time

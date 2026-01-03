@@ -82,19 +82,24 @@ class MigrationConsole:
 
     def print_banner(self) -> None:
         """Display the application banner."""
+        # Box width is 62 characters between the borders
+        width = 62
+        title = "MIGRATOR".center(width)
+        subtitle = "Container Registry Migration Tool".center(width)
+        
         banner = Text()
-        banner.append("╔══════════════════════════════════════════════════════════════╗\n", style="bold cyan")
+        banner.append("╔" + "═" * width + "╗\n", style="bold cyan")
         banner.append("║", style="bold cyan")
-        banner.append("                    MIGRATOR                        ", style="bold white")
+        banner.append(title, style="bold white")
         banner.append("║\n", style="bold cyan")
         banner.append("║", style="bold cyan")
-        banner.append("          Container Registry Migration Tool              ", style="dim white")
+        banner.append(subtitle, style="dim white")
         banner.append("║\n", style="bold cyan")
-        banner.append("╚══════════════════════════════════════════════════════════════╝", style="bold cyan")
+        banner.append("╚" + "═" * width + "╝", style="bold cyan")
         self.console.print(banner)
         self.console.print()
 
-    def print_config_summary(
+    def print_config_summary(   
         self,
         source_registry: str,
         dest_registry: str,

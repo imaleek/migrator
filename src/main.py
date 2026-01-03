@@ -197,6 +197,12 @@ def migrate_container_registry(
         help="Regex pattern to exclude repositories",
         rich_help_panel="Filtering",
     ),
+    skip_charts: bool = typer.Option(
+        False,
+        "--skip-charts",
+        help="Skip Helm chart migration (only migrate container images)",
+        rich_help_panel="Filtering",
+    ),
 
     # Output options
     verbose: bool = typer.Option(
@@ -294,6 +300,7 @@ def migrate_container_registry(
             skip_existing=skip_existing,
             include_pattern=include,
             exclude_pattern=exclude,
+            skip_charts=skip_charts,
         )
 
     except ValueError as e:

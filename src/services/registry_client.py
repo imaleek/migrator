@@ -294,10 +294,11 @@ class RegistryClient:
         """
         repositories = []
         url = f"{self.base_url}/_catalog"
-        params = {"n": min(limit, 100)}
+        # Use larger page size for faster retrieval (most registries support up to 1000)
+        page_size = min(limit, 1000)
+        params = {"n": page_size}
 
-        # Debug: Log the URL being used
-        logger.debug(f"Listing repositories from: {url}")
+        logger.debug(f"Listing repositories from: {url} (limit: {limit})")
 
         while url and len(repositories) < limit:
             # Ensure URL has protocol (fix for pagination URLs)
@@ -324,7 +325,12 @@ class RegistryClient:
                 break
 
             data = response.json()
-            repositories.extend(data.get("repositories", []))
+            new_repos = data.get("repositories", [])
+            repositories.extend(new_repos)
+            
+            # Log progress for large registries
+            if len(repositories) % 5000 == 0 and len(repositories) > 0:
+                logger.debug(f"Retrieved {len(repositories)} repositories so far...")
 
             # Check for pagination
             link = response.headers.get("Link", "")
@@ -339,7 +345,12 @@ class RegistryClient:
             else:
                 break
 
-        logger.debug(f"Found {len(repositories)} repositories")
+        actual_count = len(repositories)
+        if actual_count >= limit:
+            logger.info(f"Retrieved {actual_count} repositories (hit limit of {limit})")
+        else:
+            logger.info(f"Retrieved {actual_count} repositories")
+        
         return repositories[:limit]
 
     async def list_tags(self, repository: str, limit: int = 100000) -> list[str]:
@@ -354,8 +365,12 @@ class RegistryClient:
             List of tag names
         """
         tags = []
-        url = f"{self.base_url}/{quote(repository, safe='')}/tags/list"
-        params = {"n": min(limit, 100)}
+        url = f"{self.base_url}/{quote(repository, safe='/')}/tags/list"
+        # Use larger page size for faster retrieval (most registries support up to 1000)
+        page_size = min(limit, 1000)
+        params = {"n": page_size}
+
+        logger.debug(f"Listing tags for {repository} (limit: {limit})")
 
         while url and len(tags) < limit:
             # Ensure URL has protocol (fix for pagination URLs)
@@ -387,6 +402,10 @@ class RegistryClient:
             data = response.json()
             new_tags = data.get("tags") or []
             tags.extend(new_tags)
+            
+            # Log progress for repositories with many tags
+            if len(tags) % 100 == 0 and len(tags) > 0:
+                logger.debug(f"Retrieved {len(tags)} tags for {repository} so far...")
 
             # Check for pagination (Link header)
             link = response.headers.get("Link", "")
@@ -401,7 +420,12 @@ class RegistryClient:
             else:
                 break
 
-        logger.debug(f"Found {len(tags)} tags for {repository}")
+        actual_count = len(tags)
+        if actual_count >= limit:
+            logger.debug(f"Retrieved {actual_count} tags for {repository} (hit limit of {limit})")
+        elif actual_count > 0:
+            logger.debug(f"Retrieved {actual_count} tags for {repository}")
+        
         return tags[:limit]
 
     async def get_manifest(
@@ -419,7 +443,7 @@ class RegistryClient:
         Returns:
             Tuple of (ManifestInfo, raw_manifest_bytes)
         """
-        url = f"{self.base_url}/{quote(repository, safe='')}/manifests/{reference}"
+        url = f"{self.base_url}/{quote(repository, safe='/')}/manifests/{reference}"
 
         headers = self._get_auth_header()
         headers["Accept"] = ", ".join(self.MANIFEST_TYPES)
@@ -503,7 +527,7 @@ class RegistryClient:
         Returns:
             True if blob exists
         """
-        url = f"{self.base_url}/{quote(repository, safe='')}/blobs/{digest}"
+        url = f"{self.base_url}/{quote(repository, safe='/')}/blobs/{digest}"
 
         response = await self._client.head(
             url,
@@ -537,7 +561,7 @@ class RegistryClient:
         Yields:
             Chunks of blob data
         """
-        url = f"{self.base_url}/{quote(repository, safe='')}/blobs/{digest}"
+        url = f"{self.base_url}/{quote(repository, safe='/')}/blobs/{digest}"
 
         async with self._client.stream(
             "GET",
@@ -573,7 +597,7 @@ class RegistryClient:
         Returns:
             True if mount succeeded
         """
-        url = f"{self.base_url}/{quote(dest_repository, safe='')}/blobs/uploads/"
+        url = f"{self.base_url}/{quote(dest_repository, safe='/')}/blobs/uploads/"
         params = {
             "mount": digest,
             "from": source_repository,
@@ -616,7 +640,7 @@ class RegistryClient:
             content_type: MIME type
         """
         # Start upload session
-        url = f"{self.base_url}/{quote(repository, safe='')}/blobs/uploads/"
+        url = f"{self.base_url}/{quote(repository, safe='/')}/blobs/uploads/"
 
         response = await self._client.post(
             url,
@@ -691,7 +715,7 @@ class RegistryClient:
             total_size: Total size of data
         """
         # Start upload session
-        url = f"{self.base_url}/{quote(repository, safe='')}/blobs/uploads/"
+        url = f"{self.base_url}/{quote(repository, safe='/')}/blobs/uploads/"
 
         response = await self._client.post(
             url,
@@ -782,7 +806,7 @@ class RegistryClient:
         Returns:
             Manifest digest
         """
-        url = f"{self.base_url}/{quote(repository, safe='')}/manifests/{reference}"
+        url = f"{self.base_url}/{quote(repository, safe='/')}/manifests/{reference}"
 
         headers = self._get_auth_header()
         headers["Content-Type"] = media_type
@@ -798,6 +822,9 @@ class RegistryClient:
                 response,
                 f"repository:{repository}:push"
             )
+            # Get fresh auth headers with the new token
+            headers = self._get_auth_header()
+            headers["Content-Type"] = media_type
             response = await self._client.put(
                 url,
                 content=manifest,

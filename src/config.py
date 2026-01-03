@@ -143,6 +143,7 @@ class MigrationConfig(BaseModel):
     skip_existing: bool = Field(default=True, description="Skip images that already exist in destination")
     include_pattern: str | None = Field(default=None, description="Regex pattern to include repositories")
     exclude_pattern: str | None = Field(default=None, description="Regex pattern to exclude repositories")
+    skip_charts: bool = Field(default=False, description="Skip Helm chart migration (only migrate images)")
     retry_attempts: int = Field(default=3, ge=1, le=10, description="Number of retry attempts on failure")
     retry_delay: float = Field(default=2.0, ge=0.5, le=30.0, description="Delay between retries in seconds")
 

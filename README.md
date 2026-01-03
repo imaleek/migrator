@@ -104,12 +104,14 @@ Options:
     --source-user, -su        Source registry username
     --source-password, -sp    Source registry password
     --source-insecure         Allow HTTP connection
+    --source-namespace, -sn   Source namespace/project prefix
 
   Destination Registry:
     --destination-registry, -dr    Destination registry URL
     --destination-user, -du        Destination registry username
     --destination-password, -dp    Destination registry password
     --destination-insecure         Allow HTTP connection
+    --destination-namespace, -dn   Destination namespace/project prefix
 
   Migration Options:
     --parallel, -p            Parallel jobs (1-20, default: 4)
@@ -119,11 +121,14 @@ Options:
   Filtering:
     --include, -i             Regex to include repositories
     --exclude, -e             Regex to exclude repositories
+    --skip-charts             Skip Helm chart migration (images only)
 
   Output:
     --verbose, -v             Enable verbose output
     --debug                   Enable debug logging
 ```
+
+> **Note**: Some registries (e.g., Huawei SWR Basic Edition) do not support OCI Helm charts. Use `--skip-charts` to migrate only container images.
 
 ## Architecture
 

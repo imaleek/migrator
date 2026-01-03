@@ -355,6 +355,57 @@ class TestRegistryClientBlobs:
         client._client = mock_httpx_client
         
         await client.upload_blob("repo", "sha256:abc", b"data")
+    
+    @pytest.mark.asyncio
+    async def test_upload_blob_with_slashes_in_repo(self, client, mock_httpx_client):
+        """Test that repository names with slashes are not URL-encoded incorrectly."""
+        mock_start = MagicMock()
+        mock_start.status_code = 202
+        mock_start.headers = {"Location": "https://test.io/v2/namespace/repo/uploads/123"}
+        
+        mock_finish = MagicMock()
+        mock_finish.status_code = 201
+        
+        mock_httpx_client.post.return_value = mock_start
+        mock_httpx_client.put.return_value = mock_finish
+        
+        client._client = mock_httpx_client
+        
+        # Repository with slash should not fail
+        await client.upload_blob("namespace/repo", "sha256:abc", b"data")
+        
+        # Verify that post was called with URL containing the slash (not encoded as %2F)
+        call_args = mock_httpx_client.post.call_args
+        assert "/namespace/repo/" in str(call_args) or "namespace/repo" in str(call_args)
+    
+    @pytest.mark.asyncio
+    async def test_upload_manifest_auth_refresh(self, client, mock_httpx_client):
+        """Test that upload_manifest refreshes auth headers after 401."""
+        mock_401 = MagicMock()
+        mock_401.status_code = 401
+        mock_401.headers = {"www-authenticate": 'Bearer realm="https://auth.io/token"'}
+        
+        mock_token = MagicMock()
+        mock_token.status_code = 200
+        mock_token.json.return_value = {"token": "new-token"}
+        
+        mock_201 = MagicMock()
+        mock_201.status_code = 201
+        mock_201.headers = {"Docker-Content-Digest": "sha256:abc"}
+        
+        # First PUT returns 401, GET token, second PUT succeeds
+        mock_httpx_client.put.side_effect = [mock_401, mock_201]
+        mock_httpx_client.get.return_value = mock_token
+        
+        client._client = mock_httpx_client
+        
+        result = await client.upload_manifest(
+            "repo", "v1.0", b"{}",
+            "application/vnd.docker.distribution.manifest.v2+json"
+        )
+        assert result == "sha256:abc"
+        # Verify put was called twice (initial + retry)
+        assert mock_httpx_client.put.call_count == 2
 
 
 class TestRegistryClientImageCopy:

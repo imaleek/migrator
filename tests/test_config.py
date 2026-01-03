@@ -209,6 +209,7 @@ class TestMigrationConfig:
         assert config.skip_existing is True
         assert config.include_pattern is None
         assert config.exclude_pattern is None
+        assert config.skip_charts is False
         assert config.retry_attempts == 3
         assert config.retry_delay == 2.0
     
@@ -261,6 +262,25 @@ class TestMigrationConfig:
             MigrationConfig(
                 source=source, destination=dest, include_pattern="[invalid"
             )
+    
+    def test_skip_charts_option(self):
+        """Test skip_charts configuration option."""
+        source = RegistryCredentials(
+            registry="source.io", username="u", password="p"
+        )
+        dest = RegistryCredentials(
+            registry="dest.io", username="u", password="p"
+        )
+        
+        # Default is False
+        config_default = MigrationConfig(source=source, destination=dest)
+        assert config_default.skip_charts is False
+        
+        # Can be set to True
+        config_skip = MigrationConfig(
+            source=source, destination=dest, skip_charts=True
+        )
+        assert config_skip.skip_charts is True
 
 
 class TestImageReference:
