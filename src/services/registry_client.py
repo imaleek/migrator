@@ -1222,10 +1222,12 @@ class RegistryClient:
                             return 0
 
                     # Stream and upload the layer
+                    layer_size = layer.get("size", 0)
                     layer_bytes = await self._stream_copy_blob(
                         source_repo, layer_digest,
                         dest_client, dest_repo,
-                        layer_media_type
+                        layer_media_type,
+                        size_hint=layer_size
                     )
 
                     if blob_cache:
@@ -1266,13 +1268,14 @@ class RegistryClient:
         digest: str,
         dest_client: "RegistryClient",
         dest_repo: str,
-        media_type: str = "application/octet-stream"
+        media_type: str = "application/octet-stream",
+        size_hint: int = 0
     ) -> int:
         """
-        Stream copy a blob from source to destination with chunked buffer.
+        Stream copy a blob from source to destination.
 
-        Uses a smaller memory buffer compared to the old approach of
-        accumulating the entire blob in memory.
+        Uses chunked streaming for large blobs to minimize memory usage.
+        Small blobs (<10MB) use faster in-memory copy.
 
         Args:
             source_repo: Source repository
@@ -1280,29 +1283,77 @@ class RegistryClient:
             dest_client: Destination registry client
             dest_repo: Destination repository
             media_type: Blob media type
+            size_hint: Optional size hint for choosing copy strategy
 
         Returns:
             Number of bytes transferred
         """
-        # For blobs under 50MB, use simple in-memory copy (faster)
-        # For larger blobs, this could be enhanced with true streaming
-        # but most registries require Content-Length header
-        chunks = []
+        import gc
+        
+        # Threshold for switching to streaming (100MB)
+        STREAMING_THRESHOLD = 100 * 1024 * 1024
+        
+        # First, try to get blob info for size
+        if size_hint == 0:
+            try:
+                blob_info = await self.get_blob_info(source_repo, digest)
+                size_hint = blob_info.size if blob_info else 0
+            except Exception:
+                size_hint = 0  # Unknown size, will determine from stream
+        
+        # For small blobs, use fast in-memory approach
+        if 0 < size_hint < STREAMING_THRESHOLD:
+            chunks = []
+            async for chunk in self.stream_blob(source_repo, digest):
+                chunks.append(chunk)
+            blob_data = b"".join(chunks)
+            del chunks
+            
+            await dest_client.upload_blob(
+                dest_repo, digest, blob_data, media_type
+            )
+            total_size = len(blob_data)
+            del blob_data
+            return total_size
+        
+        # For large blobs or unknown size, use streaming upload
+        # This pipes data directly from source to destination without buffering
         total_size = 0
-
-        async for chunk in self.stream_blob(source_repo, digest):
-            chunks.append(chunk)
-            total_size += len(chunk)
-
-        # Combine chunks and upload
-        blob_data = b"".join(chunks)
-        del chunks  # Free memory immediately
-
-        await dest_client.upload_blob(
-            dest_repo,
-            digest,
-            blob_data,
-            media_type
-        )
-
+        
+        async def streaming_source():
+            """Async generator that streams from source."""
+            nonlocal total_size
+            async for chunk in self.stream_blob(source_repo, digest):
+                total_size += len(chunk)
+                yield chunk
+        
+        try:
+            await dest_client.upload_blob_stream(
+                dest_repo,
+                digest,
+                streaming_source(),
+                total_size=size_hint if size_hint > 0 else None
+            )
+        except Exception as e:
+            # If streaming fails (some registries don't support it well),
+            # fall back to buffered upload
+            logger.debug(f"Streaming upload failed for {digest[:16]}, falling back to buffered: {e}")
+            chunks = []
+            total_size = 0
+            async for chunk in self.stream_blob(source_repo, digest):
+                chunks.append(chunk)
+                total_size += len(chunk)
+            
+            blob_data = b"".join(chunks)
+            del chunks
+            
+            await dest_client.upload_blob(
+                dest_repo, digest, blob_data, media_type
+            )
+            del blob_data
+        
+        # Hint to garbage collector after large blob transfer
+        if total_size > STREAMING_THRESHOLD:
+            gc.collect()
+        
         return total_size
