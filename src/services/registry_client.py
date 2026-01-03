@@ -690,6 +690,21 @@ class RegistryClient:
             headers=headers,
         )
 
+        # Handle 401 on blob upload - token may need refresh
+        if response.status_code == 401:
+            await self._handle_auth_challenge(
+                response,
+                f"repository:{repository}:push"
+            )
+            headers = self._get_auth_header()
+            headers["Content-Type"] = content_type
+            headers["Content-Length"] = str(len(data))
+            response = await self._client.put(
+                upload_url,
+                content=data,
+                headers=headers,
+            )
+
         if response.status_code != 201:
             raise ImageTransferError(
                 f"{repository}@{digest}",
@@ -758,6 +773,22 @@ class RegistryClient:
                 headers=headers,
             )
 
+            # Handle 401 on chunk upload
+            if response.status_code == 401:
+                await self._handle_auth_challenge(
+                    response,
+                    f"repository:{repository}:push"
+                )
+                headers = self._get_auth_header()
+                headers["Content-Type"] = "application/octet-stream"
+                headers["Content-Length"] = str(chunk_size)
+                headers["Content-Range"] = f"{offset}-{offset + chunk_size - 1}"
+                response = await self._client.patch(
+                    upload_url,
+                    content=chunk,
+                    headers=headers,
+                )
+
             if response.status_code not in (202, 204):
                 raise ImageTransferError(
                     f"{repository}@{digest}",
@@ -778,6 +809,17 @@ class RegistryClient:
             final_url,
             headers=self._get_auth_header(),
         )
+
+        # Handle 401 on finalize
+        if response.status_code == 401:
+            await self._handle_auth_challenge(
+                response,
+                f"repository:{repository}:push"
+            )
+            response = await self._client.put(
+                final_url,
+                headers=self._get_auth_header(),
+            )
 
         if response.status_code != 201:
             raise ImageTransferError(

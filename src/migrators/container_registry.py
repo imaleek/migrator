@@ -234,12 +234,27 @@ class ContainerRegistryMigrator(BaseMigrator):
             scan_tasks = [scan_repository(repo) for repo in filtered_repos]
             results = await asyncio.gather(*scan_tasks, return_exceptions=True)
 
-        # Collect results
+        # Collect results with deduplication
+        seen_refs: set[str] = set()
+        duplicate_count = 0
+        
         for result in results:
             if isinstance(result, Exception):
                 logger.debug(f"Repository scan failed: {result}")
                 continue
             for item_type, ref in result:
+                # Create unique key for deduplication
+                if item_type == "chart":
+                    ref_key = f"chart:{ref.full_reference}"
+                else:
+                    ref_key = f"image:{ref.full_reference}"
+                
+                # Skip if already seen
+                if ref_key in seen_refs:
+                    duplicate_count += 1
+                    continue
+                seen_refs.add(ref_key)
+                
                 if item_type == "chart":
                     self._charts.append(ref)
                 else:
@@ -247,6 +262,8 @@ class ContainerRegistryMigrator(BaseMigrator):
                 discovered.append((item_type, ref))
 
         # Log scan summary
+        if duplicate_count > 0:
+            logger.debug(f"Removed {duplicate_count} duplicate items during discovery")
         if failed_count > 0:
             logger.info(f"Scan complete: {len(discovered)} items found, {failed_count} repositories failed")
         else:

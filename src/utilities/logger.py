@@ -26,6 +26,9 @@ def get_logger(name: str = __name__, level: int | None = None) -> logging.Logger
 
     effective_level = level if level is not None else _global_level
     logger.setLevel(effective_level)
+    
+    # Disable propagation to prevent duplicate log entries
+    logger.propagate = False
 
     with _lock:
         if name not in _handlers_configured:
