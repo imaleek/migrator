@@ -9,6 +9,7 @@ from unittest.mock import patch, MagicMock
 
 from main import app, check_tools
 from config import MigrationSummary
+from utilities.version import version
 
 runner = CliRunner()
 
@@ -27,7 +28,7 @@ class TestCLIHelp:
         """Test version flag."""
         result = runner.invoke(app, ["--version"])
         assert result.exit_code == 0
-        assert "1.0.0" in result.output
+        assert version in result.output
     
     def test_migrate_help(self):
         """Test migrate command help."""

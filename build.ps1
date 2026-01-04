@@ -4,7 +4,7 @@
 
 param(
     [string]$OutputDir = ".\dist",
-    [switch]$SkipTest
+    [switch]$SkipTest = $true
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,6 +33,8 @@ Write-Host "`n📤 Extracting binary from container..." -ForegroundColor Yellow
 # Create a temporary container to copy from
 $containerId = docker create migrator-builder:latest
 try {
+    Remove-Item -Path "$OutputDir/migrator" -Force -ErrorAction SilentlyContinue
+    
     docker cp "${containerId}:/app/dist/migrator" "$OutputDir/migrator"
     
     if ($LASTEXITCODE -ne 0) {

@@ -17,6 +17,7 @@ from config import MigrationConfig, RegistryCredentials
 from console import MigrationConsole
 from migrators.container_registry import ContainerRegistryMigrator
 from utilities.logger import get_logger, set_global_level
+from utilities.version import version
 
 # Initialize Typer app with rich help
 app = typer.Typer(
@@ -43,7 +44,7 @@ def version_callback(value: bool):
     """Display version information."""
     if value:
         console.print(Panel.fit(
-            "[bold cyan]Migrator[/bold cyan] v1.0.0\n"
+            f"[bold cyan]Migrator[/bold cyan] {version}\n"
             "[dim]Container Registry Migration Tool[/dim]",
             border_style="cyan"
         ))
@@ -368,7 +369,7 @@ def info():
     ui = MigrationConsole()
 
     console.print(Panel.fit(
-        "[bold cyan] Migrator[/bold cyan] v1.0.0",
+        f"[bold cyan] Migrator[/bold cyan] {version}",
         border_style="cyan"
     ))
     console.print()
