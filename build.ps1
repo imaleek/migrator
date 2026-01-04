@@ -4,12 +4,24 @@
 
 param(
     [string]$OutputDir = ".\dist",
-    [switch]$SkipTest = $true
+    [switch]$SkipTest = $false
 )
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "🚀 Building Migrator standalone binary..." -ForegroundColor Cyan
+$version = (Get-Content "src/utilities/version.py") -replace 'version\s*=\s*"(.*)"','$1'
+
+if (-not $SkipTest) {
+    Write-Host "🧪 Running tests..." -ForegroundColor Yellow
+    python -m pytest tests -v --tb=short --cov=src --cov-report=html
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "❌ Tests failed!" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "`n✅ Tests passed!" -ForegroundColor Green
+}
+
+Write-Host "`n🚀 Building Migrator standalone binary v$version..." -ForegroundColor Cyan
 
 # Ensure output directory exists
 if (-not (Test-Path $OutputDir)) {
@@ -34,7 +46,7 @@ Write-Host "`n📤 Extracting binary from container..." -ForegroundColor Yellow
 $containerId = docker create migrator-builder:latest
 try {
     Remove-Item -Path "$OutputDir/migrator" -Force -ErrorAction SilentlyContinue
-    
+
     docker cp "${containerId}:/app/dist/migrator" "$OutputDir/migrator"
     
     if ($LASTEXITCODE -ne 0) {
