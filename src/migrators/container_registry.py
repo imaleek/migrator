@@ -52,6 +52,8 @@ class ContainerRegistryMigrator(BaseMigrator):
         self._state: MigrationState | None = None
         self._blob_cache: BlobCache | None = None
         self._checkpoint_counter: int = 0
+        # Per-repository tracking for accountability
+        self._repo_stats: dict[str, dict] = {}  # repo -> {discovered, migrated, failed, skipped}
 
     @property
     def name(self) -> str:
@@ -199,12 +201,23 @@ class ContainerRegistryMigrator(BaseMigrator):
                         scanned_count += 1
                         return []
 
+                    # Initialize repo stats
+                    self._repo_stats[repo] = {
+                        "discovered": len(tags),
+                        "migrated": 0,
+                        "failed": 0,
+                        "skipped": 0,
+                        "is_chart": False,
+                    }
+
                     # Always check if this is a Helm chart repository
                     is_chart = await self._is_helm_chart_repo(repo, tags[0])
+                    self._repo_stats[repo]["is_chart"] = is_chart
                     
                     # If skip_charts is enabled and this is a chart, skip entirely
                     if is_chart and self.config.skip_charts:
                         scanned_count += 1
+                        self._repo_stats[repo]["skipped"] = len(tags)
                         logger.debug(f"Skipping Helm chart repository: {repo}")
                         return []
 
@@ -232,7 +245,15 @@ class ContainerRegistryMigrator(BaseMigrator):
                 except Exception as e:
                     scanned_count += 1
                     failed_count += 1
-                    logger.debug(f"Failed to scan repository {repo}: {e}")
+                    # Track failed scan
+                    self._repo_stats[repo] = {
+                        "discovered": 0,
+                        "migrated": 0,
+                        "failed": 0,
+                        "skipped": 0,
+                        "scan_error": str(e),
+                    }
+                    logger.warning(f"Failed to scan repository {repo}: {e}")
                     return []
 
         # Scan all repositories in parallel with progress indication
@@ -517,6 +538,18 @@ class ContainerRegistryMigrator(BaseMigrator):
                 self.add_result(result)
                 progress_task.advance(1)
                 
+                # Update per-repository stats
+                if item_type == "image" and hasattr(ref, 'repository'):
+                    repo = ref.repository
+                    if repo in self._repo_stats:
+                        if result.success:
+                            if result.skipped:
+                                self._repo_stats[repo]["skipped"] += 1
+                            else:
+                                self._repo_stats[repo]["migrated"] += 1
+                        else:
+                            self._repo_stats[repo]["failed"] += 1
+                
                 # Update state
                 if self._state:
                     if result.success:
@@ -669,6 +702,9 @@ class ContainerRegistryMigrator(BaseMigrator):
             summary = self.finalize_summary(start_time)
             self.console.show_summary(summary)
 
+            # Log per-repository accountability summary
+            self._log_repository_summary()
+
             # Log blob cache stats
             if self._blob_cache:
                 self._blob_cache.log_stats()
@@ -705,3 +741,51 @@ class ContainerRegistryMigrator(BaseMigrator):
                 await self._source_helm.cleanup()
             if self._dest_helm:
                 await self._dest_helm.cleanup()
+
+    def _log_repository_summary(self) -> None:
+        """Log per-repository migration accountability summary."""
+        if not self._repo_stats:
+            return
+        
+        # Calculate totals
+        total_repos = len(self._repo_stats)
+        total_discovered = sum(s.get("discovered", 0) for s in self._repo_stats.values())
+        total_migrated = sum(s.get("migrated", 0) for s in self._repo_stats.values())
+        total_failed = sum(s.get("failed", 0) for s in self._repo_stats.values())
+        total_skipped = sum(s.get("skipped", 0) for s in self._repo_stats.values())
+        
+        # Log overall summary
+        logger.info(
+            f"Repository Summary: {total_repos} repos, "
+            f"{total_discovered} tags discovered, "
+            f"{total_migrated} migrated, "
+            f"{total_failed} failed, "
+            f"{total_skipped} skipped"
+        )
+        
+        # Find repos with issues (failed or incomplete)
+        repos_with_issues = []
+        for repo, stats in self._repo_stats.items():
+            discovered = stats.get("discovered", 0)
+            migrated = stats.get("migrated", 0)
+            failed = stats.get("failed", 0)
+            skipped = stats.get("skipped", 0)
+            scan_error = stats.get("scan_error")
+            
+            if scan_error:
+                repos_with_issues.append((repo, f"scan failed: {scan_error}"))
+            elif failed > 0:
+                repos_with_issues.append((repo, f"{failed}/{discovered} tags failed"))
+            elif migrated + skipped < discovered:
+                unprocessed = discovered - migrated - skipped
+                repos_with_issues.append((repo, f"{unprocessed}/{discovered} tags not processed"))
+        
+        # Log repos with issues
+        if repos_with_issues:
+            logger.warning(f"Repositories with issues ({len(repos_with_issues)}):")
+            for repo, issue in repos_with_issues[:20]:  # Limit to 20 for log readability
+                logger.warning(f"  - {repo}: {issue}")
+            if len(repos_with_issues) > 20:
+                logger.warning(f"  ... and {len(repos_with_issues) - 20} more")
+        else:
+            logger.info("All repositories migrated successfully with full accountability")

@@ -314,25 +314,24 @@ class RegistryClient:
                 str(e)
             ) from e
 
-    async def list_repositories(self, limit: int = 100000) -> list[str]:
+    async def list_repositories(self) -> list[str]:
         """
         List all repositories in the registry.
 
-        Args:
-            limit: Maximum number of repositories to return
+        Fetches ALL repositories using pagination.
 
         Returns:
             List of repository names
         """
         repositories = []
         url = f"{self.base_url}/_catalog"
-        # Use larger page size for faster retrieval (most registries support up to 1000)
-        page_size = min(limit, 1000)
+        # Use large page size for efficient retrieval
+        page_size = 1000
         params = {"n": page_size}
 
-        logger.debug(f"Listing repositories from: {url} (limit: {limit})")
+        logger.debug(f"Listing repositories from: {url}")
 
-        while url and len(repositories) < limit:
+        while url:
             # Ensure URL has protocol (fix for pagination URLs)
             if url and not url.startswith(("http://", "https://")):
                 protocol = "http" if self.credentials.insecure else "https"
@@ -361,8 +360,8 @@ class RegistryClient:
             repositories.extend(new_repos)
             
             # Log progress for large registries
-            if len(repositories) % 5000 == 0 and len(repositories) > 0:
-                logger.debug(f"Retrieved {len(repositories)} repositories so far...")
+            if len(repositories) % 100 == 0 and len(repositories) > 0:
+                logger.info(f"Retrieved {len(repositories)} repositories so far...")
 
             # Check for pagination
             link = response.headers.get("Link", "")
@@ -377,34 +376,30 @@ class RegistryClient:
             else:
                 break
 
-        actual_count = len(repositories)
-        if actual_count >= limit:
-            logger.info(f"Retrieved {actual_count} repositories (hit limit of {limit})")
-        else:
-            logger.info(f"Retrieved {actual_count} repositories")
-        
-        return repositories[:limit]
+        logger.info(f"Retrieved {len(repositories)} total repositories")
+        return repositories
 
-    async def list_tags(self, repository: str, limit: int = 100000) -> list[str]:
+    async def list_tags(self, repository: str) -> list[str]:
         """
         List all tags for a repository.
 
+        Fetches ALL tags using pagination.
+
         Args:
             repository: Repository name
-            limit: Maximum number of tags to return
 
         Returns:
             List of tag names
         """
         tags = []
         url = f"{self.base_url}/{quote(repository, safe='/')}/tags/list"
-        # Use larger page size for faster retrieval (most registries support up to 1000)
-        page_size = min(limit, 1000)
+        # Use large page size for efficient retrieval
+        page_size = 1000
         params = {"n": page_size}
 
-        logger.debug(f"Listing tags for {repository} (limit: {limit})")
+        logger.debug(f"Listing tags for {repository}")
 
-        while url and len(tags) < limit:
+        while url:
             # Ensure URL has protocol (fix for pagination URLs)
             if url and not url.startswith(("http://", "https://")):
                 protocol = "http" if self.credentials.insecure else "https"
@@ -452,13 +447,10 @@ class RegistryClient:
             else:
                 break
 
-        actual_count = len(tags)
-        if actual_count >= limit:
-            logger.debug(f"Retrieved {actual_count} tags for {repository} (hit limit of {limit})")
-        elif actual_count > 0:
-            logger.debug(f"Retrieved {actual_count} tags for {repository}")
+        if len(tags) > 0:
+            logger.debug(f"Retrieved {len(tags)} total tags for {repository}")
         
-        return tags[:limit]
+        return tags
 
     async def get_manifest(
         self,
@@ -1275,7 +1267,7 @@ class RegistryClient:
         Stream copy a blob from source to destination.
 
         Uses chunked streaming for large blobs to minimize memory usage.
-        Small blobs (<10MB) use faster in-memory copy.
+        Small blobs (<100MB) use faster in-memory copy.
 
         Args:
             source_repo: Source repository
