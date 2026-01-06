@@ -182,8 +182,8 @@ class ContainerRegistryMigrator(BaseMigrator):
         else:
             logger.info(f"Scanning {len(filtered_repos)} repositories")
 
-        # Higher concurrency for scanning - registry APIs can handle more parallel requests
-        scan_concurrency = min(self.config.parallel_jobs * 5, 50)  # Up to 50 concurrent scans
+        # Use config for scan concurrency (default 10, reduced from 50 to avoid overwhelming registry)
+        scan_concurrency = self.config.scan_concurrency
         semaphore = asyncio.Semaphore(scan_concurrency)
         
         # Progress counter
@@ -192,69 +192,114 @@ class ContainerRegistryMigrator(BaseMigrator):
         failed_count = 0
 
         async def scan_repository(repo: str) -> list[tuple[str, Any]]:
-            """Scan a single repository for tags and classify items."""
+            """Scan a single repository for tags and classify items with retry."""
             nonlocal scanned_count, failed_count
+            
+            # Retry parameters for transient errors
+            max_retries = 3
+            base_delay = 2.0
+            
             async with semaphore:
-                try:
-                    tags = await self._source_client.list_tags(repo)
-                    if not tags:
-                        scanned_count += 1
-                        return []
+                last_error = None
+                for attempt in range(max_retries):
+                    try:
+                        # list_tags now uses set for deduplication and handles auth retries internally
+                        tags = await self._source_client.list_tags(repo)
+                        if not tags:
+                            scanned_count += 1
+                            return []
 
-                    # Initialize repo stats
-                    self._repo_stats[repo] = {
-                        "discovered": len(tags),
-                        "migrated": 0,
-                        "failed": 0,
-                        "skipped": 0,
-                        "is_chart": False,
-                    }
+                        # Initialize repo stats
+                        self._repo_stats[repo] = {
+                            "discovered": len(tags),
+                            "migrated": 0,
+                            "failed": 0,
+                            "skipped": 0,
+                            "is_chart": False,
+                        }
 
-                    # Always check if this is a Helm chart repository
-                    is_chart = await self._is_helm_chart_repo(repo, tags[0])
-                    self._repo_stats[repo]["is_chart"] = is_chart
-                    
-                    # If skip_charts is enabled and this is a chart, skip entirely
-                    if is_chart and self.config.skip_charts:
-                        scanned_count += 1
-                        self._repo_stats[repo]["skipped"] = len(tags)
-                        logger.debug(f"Skipping Helm chart repository: {repo}")
-                        return []
-
-                    items = []
-                    for tag in tags:
-                        if is_chart:
-                            # Extract chart name from repository path
-                            chart_name = repo.split("/")[-1]
-                            chart_ref = ChartReference(
-                                name=chart_name,
-                                version=tag,
-                                repository="/".join(repo.split("/")[:-1]) if "/" in repo else None
+                        # ALWAYS check manifest to properly detect type
+                        # This is required because Helm charts stored as OCI 
+                        # often don't follow naming patterns
+                        is_chart = False
+                        try:
+                            manifest_info, manifest_bytes = await self._source_client.get_manifest(
+                                repo, tags[0]
                             )
-                            items.append(("chart", chart_ref))
+                            manifest_data = __import__("json").loads(manifest_bytes)
+                            is_chart = self._source_client.is_helm_chart(manifest_data)
+                        except Exception as e:
+                            logger.debug(f"Could not fetch manifest for {repo}:{tags[0]}: {e}")
+                        
+                        self._repo_stats[repo]["is_chart"] = is_chart
+                        
+                        # Apply skip filters
+                        # Skip Helm charts if configured
+                        if is_chart and self.config.skip_charts:
+                            scanned_count += 1
+                            self._repo_stats[repo]["skipped"] = len(tags)
+                            logger.debug(f"Skipping Helm chart repository: {repo}")
+                            return []
+                        
+                        # Skip regular images if configured  
+                        if not is_chart and self.config.skip_images:
+                            scanned_count += 1
+                            self._repo_stats[repo]["skipped"] = len(tags)
+                            logger.debug(f"Skipping container image repository: {repo}")
+                            return []
+
+                        items = []
+                        for tag in tags:
+                            if is_chart:
+                                # Extract chart name from repository path
+                                chart_name = repo.split("/")[-1]
+                                chart_ref = ChartReference(
+                                    name=chart_name,
+                                    version=tag,
+                                    repository="/".join(repo.split("/")[:-1]) if "/" in repo else None
+                                )
+                                items.append(("chart", chart_ref))
+                            else:
+                                image_ref = ImageReference(repository=repo, tag=tag)
+                                items.append(("image", image_ref))
+                        
+                        scanned_count += 1
+                        # Log progress every 20 repositories
+                        if scanned_count % 20 == 0:
+                            logger.info(f"Scanned {scanned_count}/{total_repos} repositories...")
+                        
+                        return items
+                        
+                    except Exception as e:
+                        last_error = e
+                        error_str = str(e).lower()
+                        # Check if this is a retryable error
+                        is_transient = any(msg in error_str for msg in [
+                            'disconnect', 'timeout', 'connection', 'reset',
+                            'server error', '502', '503', '504', 'temporarily'
+                        ])
+                        
+                        if is_transient and attempt < max_retries - 1:
+                            delay = base_delay * (2 ** attempt)  # Exponential backoff
+                            logger.debug(f"Retry {attempt + 1}/{max_retries} for {repo} in {delay}s: {e}")
+                            await asyncio.sleep(delay)
+                            continue
                         else:
-                            image_ref = ImageReference(repository=repo, tag=tag)
-                            items.append(("image", image_ref))
-                    
-                    scanned_count += 1
-                    # Log progress every 20 repositories
-                    if scanned_count % 20 == 0:
-                        logger.info(f"Scanned {scanned_count}/{total_repos} repositories...")
-                    
-                    return items
-                except Exception as e:
-                    scanned_count += 1
-                    failed_count += 1
-                    # Track failed scan
-                    self._repo_stats[repo] = {
-                        "discovered": 0,
-                        "migrated": 0,
-                        "failed": 0,
-                        "skipped": 0,
-                        "scan_error": str(e),
-                    }
-                    logger.warning(f"Failed to scan repository {repo}: {e}")
-                    return []
+                            break  # Non-transient error or max retries reached
+                
+                # All retries failed
+                scanned_count += 1
+                failed_count += 1
+                # Track failed scan
+                self._repo_stats[repo] = {
+                    "discovered": 0,
+                    "migrated": 0,
+                    "failed": 0,
+                    "skipped": 0,
+                    "scan_error": str(last_error),
+                }
+                logger.warning(f"Failed to scan repository {repo}: {last_error}")
+                return []
 
         # Scan all repositories in parallel with progress indication
         with self.console.status(f"Scanning {total_repos} repositories (concurrency: {scan_concurrency})..."):

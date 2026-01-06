@@ -34,38 +34,16 @@ from tenacity import (
 )
 
 from config import RegistryCredentials
-from utilities.exceptions import MigratorError
+from utilities.exceptions import (
+    ImageTransferError,
+    MigratorError,
+    RegistryAuthenticationError,
+    RegistryConnectionError,
+    TransientRegistryError,
+)
 from utilities.logger import get_logger
 
 logger = get_logger(__name__)
-
-
-class RegistryConnectionError(MigratorError):
-    """Raised when registry connection fails."""
-    def __init__(self, registry: str, message: str, details: str | None = None):
-        self.registry = registry
-        super().__init__(f"Failed to connect to {registry}: {message}", details)
-
-
-class RegistryAuthenticationError(MigratorError):
-    """Raised when registry authentication fails."""
-    def __init__(self, registry: str, message: str = "Authentication failed"):
-        self.registry = registry
-        super().__init__(f"Authentication failed for {registry}: {message}")
-
-
-class ImageTransferError(MigratorError):
-    """Raised when image transfer fails."""
-    def __init__(self, image: str, message: str, details: str | None = None):
-        self.image = image
-        super().__init__(f"Failed to transfer {image}: {message}", details)
-
-
-class TransientRegistryError(MigratorError):
-    """Raised for transient registry errors that should be retried (5xx errors)."""
-    def __init__(self, operation: str, status_code: int, details: str | None = None):
-        self.status_code = status_code
-        super().__init__(f"{operation} failed with status {status_code}", details)
 
 
 @dataclass
@@ -383,35 +361,47 @@ class RegistryClient:
         """
         List all tags for a repository.
 
-        Fetches ALL tags using pagination.
+        Uses pagination with the 'last' parameter based on actual response data,
+        not the Link header, due to Azure ACR pagination bugs.
 
         Args:
             repository: Repository name
 
         Returns:
-            List of tag names
+            List of tag names (sorted for deterministic ordering)
         """
-        tags = []
-        url = f"{self.base_url}/{quote(repository, safe='/')}/tags/list"
-        # Use large page size for efficient retrieval
-        page_size = 1000
-        params = {"n": page_size}
+        all_tags: list[str] = []
+        base_url = f"{self.base_url}/{quote(repository, safe='/')}/tags/list"
+        
+        # Use smaller page size - Azure ACR has bugs with large page sizes (1000)
+        page_size = 50
+        last_tag: str | None = None
+        max_auth_retries = 3
+        auth_retries = 0
+        page = 0
+        max_pages = 10000  # Safety limit to prevent infinite loops
 
         logger.debug(f"Listing tags for {repository}")
 
-        while url:
-            # Ensure URL has protocol (fix for pagination URLs)
-            if url and not url.startswith(("http://", "https://")):
-                protocol = "http" if self.credentials.insecure else "https"
-                url = f"{protocol}://{self.credentials.registry_host}{url}"
+        while page < max_pages:
+            page += 1
+            
+            # Build params - use last tag from previous response as cursor
+            params: dict[str, str | int] = {"n": page_size}
+            if last_tag:
+                params["last"] = last_tag
 
             response = await self._client.get(
-                url,
+                base_url,
                 params=params,
                 headers=self._get_auth_header(),
             )
 
             if response.status_code == 401:
+                auth_retries += 1
+                if auth_retries > max_auth_retries:
+                    logger.warning(f"Max auth retries reached for {repository}")
+                    break
                 await self._handle_auth_challenge(
                     response,
                     f"repository:{repository}:pull"
@@ -426,31 +416,38 @@ class RegistryClient:
                 logger.warning(f"Failed to list tags for {repository}: {response.status_code}")
                 break
 
+            # Reset auth retries on successful request
+            auth_retries = 0
+
             data = response.json()
             new_tags = data.get("tags") or []
-            tags.extend(new_tags)
+            
+            if not new_tags:
+                # No more tags
+                break
+            
+            all_tags.extend(new_tags)
             
             # Log progress for repositories with many tags
-            if len(tags) % 100 == 0 and len(tags) > 0:
-                logger.debug(f"Retrieved {len(tags)} tags for {repository} so far...")
-
-            # Check for pagination (Link header)
-            link = response.headers.get("Link", "")
-            if "rel=\"next\"" in link:
-                # Extract next URL from Link header
-                match = re.search(r'<([^>]+)>', link)
-                if match:
-                    url = match.group(1)
-                    params = {}  # Pagination URL includes params
-                else:
-                    break
-            else:
+            if len(all_tags) % 500 == 0:
+                logger.info(f"Retrieved {len(all_tags)} tags for {repository} so far...")
+            
+            last_tag = new_tags[-1]
+            
+            # If we got fewer than requested, we're done
+            if len(new_tags) < page_size:
                 break
 
-        if len(tags) > 0:
-            logger.debug(f"Retrieved {len(tags)} total tags for {repository}")
+        # Deduplicate (shouldn't be needed but safety measure) and sort
+        result = sorted(set(all_tags))
         
-        return tags
+        if len(result) != len(all_tags):
+            logger.debug(f"Deduplicated {len(all_tags) - len(result)} tags for {repository}")
+        
+        if len(result) > 0:
+            logger.debug(f"Retrieved {len(result)} total tags for {repository}")
+        
+        return result
 
     async def get_manifest(
         self,
@@ -520,6 +517,8 @@ class RegistryClient:
         """
         Check if a manifest represents a Helm chart.
 
+        Checks both media types and OCI annotations for Helm chart indicators.
+
         Args:
             manifest_data: Parsed manifest JSON
 
@@ -536,6 +535,19 @@ class RegistryClient:
         for layer in manifest_data.get("layers", []):
             layer_type = layer.get("mediaType", "")
             if any(ht in layer_type for ht in self.HELM_CHART_TYPES):
+                return True
+
+        # Check OCI annotations for Helm chart indicators
+        annotations = manifest_data.get("annotations", {})
+        if annotations:
+            # Check description for "helm chart" mention
+            description = annotations.get("org.opencontainers.image.description", "").lower()
+            if "helm" in description or "helm chart" in description:
+                return True
+            
+            # Check title for common chart suffixes
+            title = annotations.get("org.opencontainers.image.title", "").lower()
+            if title and any(suffix in title for suffix in ["-chart", "-helm"]):
                 return True
 
         return False

@@ -69,3 +69,19 @@ class RetryExhaustedError(MigratorError):
         message = f"Operation '{operation}' failed after {max_attempts} attempts"
         details = str(last_error) if last_error else None
         super().__init__(message, details)
+
+
+class ImageTransferError(MigratorError):
+    """Raised when image transfer fails."""
+
+    def __init__(self, image: str, message: str, details: str | None = None):
+        self.image = image
+        super().__init__(f"Failed to transfer {image}: {message}", details)
+
+
+class TransientRegistryError(MigratorError):
+    """Raised for transient registry errors that should be retried (5xx errors)."""
+
+    def __init__(self, operation: str, status_code: int, details: str | None = None):
+        self.status_code = status_code
+        super().__init__(f"{operation} failed with status {status_code}", details)

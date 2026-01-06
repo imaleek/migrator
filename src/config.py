@@ -144,6 +144,7 @@ class MigrationConfig(BaseModel):
     include_pattern: str | None = Field(default=None, description="Regex pattern to include repositories")
     exclude_pattern: str | None = Field(default=None, description="Regex pattern to exclude repositories")
     skip_charts: bool = Field(default=False, description="Skip Helm chart migration (only migrate images)")
+    skip_images: bool = Field(default=False, description="Skip container images (only migrate Helm charts)")
     retry_attempts: int = Field(default=3, ge=1, le=10, description="Number of retry attempts on failure")
     retry_delay: float = Field(default=2.0, ge=0.5, le=30.0, description="Delay between retries in seconds")
     # New performance and resume options
@@ -151,6 +152,8 @@ class MigrationConfig(BaseModel):
     state_dir: str = Field(default=".migrator-state", description="Directory for state files")
     layer_concurrency: int = Field(default=3, ge=1, le=10, description="Parallel layer transfers per image")
     checkpoint_interval: int = Field(default=50, ge=10, le=500, description="Save state every N items")
+    # Scan performance options
+    scan_concurrency: int = Field(default=10, ge=1, le=50, description="Parallel repository scans")
 
     @field_validator("include_pattern", "exclude_pattern")
     @classmethod

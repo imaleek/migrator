@@ -27,6 +27,7 @@ from rich.text import Text
 from rich.tree import Tree
 
 from config import MigrationSummary
+from utilities.logger import set_console
 
 
 class ItemStatus(str, Enum):
@@ -59,6 +60,7 @@ class MigrationConsole:
     - Real-time status updates
     - Beautiful summary tables
     - Error highlighting
+    - Coordinated log output (logs appear above progress bar)
     """
 
     # Color scheme
@@ -79,6 +81,9 @@ class MigrationConsole:
         self._live: Live | None = None
         self._items: dict[str, MigrationItem] = {}
         self._start_time: float = 0.0
+        
+        # Share console with logger for coordinated output
+        set_console(self.console)
 
     def print_banner(self) -> None:
         """Display the application banner."""
@@ -142,8 +147,16 @@ class MigrationConsole:
 
     @contextmanager
     def status(self, message: str) -> Generator[None, None, None]:
-        """Show a spinner with status message."""
-        with self.console.status(f"[bold cyan]{message}[/bold cyan]", spinner="dots"):
+        """
+        Show a spinner with status message.
+        
+        Uses Live display with vertical_overflow so logs appear above.
+        """
+        from rich.spinner import Spinner
+        from rich.text import Text
+        
+        spinner = Spinner("dots", text=Text(f" {message}", style="bold cyan"))
+        with Live(spinner, console=self.console, refresh_per_second=4, vertical_overflow='visible'):
             yield
 
     def create_progress(self) -> Progress:
@@ -163,12 +176,23 @@ class MigrationConsole:
 
     @contextmanager
     def migration_progress(self, total_items: int) -> Generator[Progress, None, None]:
-        """Context manager for migration progress tracking."""
+        """
+        Context manager for migration progress tracking.
+        
+        Uses vertical_overflow='visible' so log messages print above
+        the progress bar without interference.
+        """
         self._start_time = time.time()
 
         progress = self.create_progress()
 
-        with Live(progress, console=self.console, refresh_per_second=10) as live:
+        # vertical_overflow='visible' allows content to print above the live display
+        with Live(
+            progress,
+            console=self.console,
+            refresh_per_second=4,
+            vertical_overflow='visible',
+        ) as live:
             self._live = live
             self._progress = progress
             yield progress

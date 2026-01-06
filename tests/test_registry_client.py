@@ -214,11 +214,13 @@ class TestRegistryClientRepositories:
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {"name": "app", "tags": ["v1.0", "latest"]}
+        mock_response.headers = {}  # No Link header
         mock_httpx_client.get.return_value = mock_response
         client._client = mock_httpx_client
         
         tags = await client.list_tags("app")
-        assert tags == ["v1.0", "latest"]
+        # list_tags returns sorted tags for determinism
+        assert tags == ["latest", "v1.0"]
     
     @pytest.mark.asyncio
     async def test_list_tags_not_found(self, client, mock_httpx_client):

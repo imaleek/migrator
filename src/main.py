@@ -204,6 +204,12 @@ def migrate_container_registry(
         help="Skip Helm chart migration (only migrate container images)",
         rich_help_panel="Filtering",
     ),
+    skip_images: bool = typer.Option(
+        False,
+        "--skip-images",
+        help="Skip container image migration (only migrate Helm charts)",
+        rich_help_panel="Filtering",
+    ),
 
     # Output options
     verbose: bool = typer.Option(
@@ -217,6 +223,13 @@ def migrate_container_registry(
         False,
         "--debug",
         help="Enable debug logging",
+        rich_help_panel="Output",
+    ),
+    log_file: str | None = typer.Option(
+        None,
+        "--log-file",
+        "-l",
+        help="Write logs to file (keeps console clean for progress)",
         rich_help_panel="Output",
     ),
     # Resume and performance options
@@ -239,6 +252,15 @@ def migrate_container_registry(
         min=1,
         max=10,
         help="Number of parallel layer transfers per image",
+        rich_help_panel="Performance",
+    ),
+    scan_concurrency: int = typer.Option(
+        10,
+        "--scan-concurrency",
+        "-sc",
+        min=1,
+        max=50,
+        help="Number of parallel repository scans (reduce if getting disconnections)",
         rich_help_panel="Performance",
     ),
 ):
@@ -280,6 +302,12 @@ def migrate_container_registry(
         --dry-run
     """
     # Set up logging
+    # Set up file logging first (if specified)
+    from utilities.logger import set_log_file
+    if log_file:
+        set_log_file(log_file)
+        console.print(f"[dim]Logging to: {log_file}[/dim]")
+    
     if debug:
         set_global_level(logging.DEBUG)
     elif verbose:
@@ -325,9 +353,11 @@ def migrate_container_registry(
             include_pattern=include,
             exclude_pattern=exclude,
             skip_charts=skip_charts,
+            skip_images=skip_images,
             resume=resume,
             state_dir=state_dir,
             layer_concurrency=layer_concurrency,
+            scan_concurrency=scan_concurrency,
         )
 
     except ValueError as e:
