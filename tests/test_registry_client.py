@@ -482,3 +482,207 @@ class TestRegistryExceptions:
         error = ImageTransferError("app:v1.0", "Upload failed")
         assert "app:v1.0" in str(error)
         assert error.image == "app:v1.0"
+
+
+class TestIsHelmChart:
+    """Tests for Helm chart detection."""
+    
+    @pytest.fixture
+    def client(self, sample_registry_credentials):
+        return RegistryClient(sample_registry_credentials)
+    
+    def test_is_helm_chart_by_config_media_type(self, client):
+        """Test detection via Helm chart config media type."""
+        manifest = {
+            "config": {
+                "mediaType": "application/vnd.cncf.helm.config.v1+json"
+            },
+            "layers": []
+        }
+        assert client.is_helm_chart(manifest) is True
+    
+    def test_is_helm_chart_by_layer_media_type(self, client):
+        """Test detection via Helm chart layer media type."""
+        manifest = {
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json"
+            },
+            "layers": [
+                {"mediaType": "application/vnd.cncf.helm.chart.content.v1.tar+gzip"}
+            ]
+        }
+        assert client.is_helm_chart(manifest) is True
+    
+    def test_is_helm_chart_by_description_annotation(self, client):
+        """Test detection via OCI description annotation containing 'helm chart'."""
+        manifest = {
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json"
+            },
+            "layers": [
+                {"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip"}
+            ],
+            "annotations": {
+                "org.opencontainers.image.description": "A Helm Chart to Deploy Services"
+            }
+        }
+        assert client.is_helm_chart(manifest) is True
+    
+    def test_is_helm_chart_by_title_annotation(self, client):
+        """Test detection via title annotation with chart suffix."""
+        manifest = {
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json"
+            },
+            "layers": [],
+            "annotations": {
+                "org.opencontainers.image.title": "myapp-chart"
+            }
+        }
+        assert client.is_helm_chart(manifest) is True
+    
+    def test_is_helm_chart_false_for_regular_image(self, client):
+        """Test that regular container images are not detected as charts."""
+        manifest = {
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json"
+            },
+            "layers": [
+                {"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip"}
+            ]
+        }
+        assert client.is_helm_chart(manifest) is False
+    
+    def test_is_helm_chart_empty_manifest(self, client):
+        """Test that empty manifest returns False."""
+        assert client.is_helm_chart({}) is False
+    
+    def test_is_helm_chart_docker_manifest(self, client):
+        """Test that Docker manifests without chart indicators return False."""
+        manifest = {
+            "config": {
+                "mediaType": "application/vnd.docker.container.image.v1+json"
+            },
+            "layers": [
+                {"mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip"}
+            ]
+        }
+        assert client.is_helm_chart(manifest) is False
+
+
+class TestConvertManifest:
+    """Tests for manifest format conversion."""
+    
+    @pytest.fixture
+    def client(self, sample_registry_credentials):
+        return RegistryClient(sample_registry_credentials)
+    
+    def test_convert_oci_to_docker_manifest(self, client):
+        """Test converting OCI manifest to Docker format."""
+        oci_manifest = {
+            "schemaVersion": 2,
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": "sha256:abc",
+                "size": 1234
+            },
+            "layers": [
+                {
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                    "digest": "sha256:def",
+                    "size": 5678
+                }
+            ]
+        }
+        
+        converted, media_type = client.convert_manifest(
+            __import__("json").dumps(oci_manifest).encode(),
+            "application/vnd.oci.image.manifest.v1+json",
+            "application/vnd.docker.distribution.manifest.v2+json"
+        )
+        
+        result = __import__("json").loads(converted)
+        assert result["config"]["mediaType"] == "application/vnd.docker.container.image.v1+json"
+        assert media_type == "application/vnd.docker.distribution.manifest.v2+json"
+    
+    def test_convert_docker_to_oci_manifest(self, client):
+        """Test converting Docker manifest to OCI format."""
+        docker_manifest = {
+            "schemaVersion": 2,
+            "config": {
+                "mediaType": "application/vnd.docker.container.image.v1+json",
+                "digest": "sha256:abc",
+                "size": 1234
+            },
+            "layers": [
+                {
+                    "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+                    "digest": "sha256:def",
+                    "size": 5678
+                }
+            ]
+        }
+        
+        converted, media_type = client.convert_manifest(
+            __import__("json").dumps(docker_manifest).encode(),
+            "application/vnd.docker.distribution.manifest.v2+json",
+            "application/vnd.oci.image.manifest.v1+json"
+        )
+        
+        result = __import__("json").loads(converted)
+        assert result["config"]["mediaType"] == "application/vnd.oci.image.config.v1+json"
+        assert media_type == "application/vnd.oci.image.manifest.v1+json"
+    
+    def test_convert_manifest_adds_schema_version(self, client):
+        """Test that conversion adds schemaVersion if missing."""
+        manifest = {
+            "config": {"mediaType": "application/vnd.oci.image.config.v1+json"},
+            "layers": []
+        }
+        
+        converted, _ = client.convert_manifest(
+            __import__("json").dumps(manifest).encode(),
+            "application/vnd.oci.image.manifest.v1+json",
+            "application/vnd.docker.distribution.manifest.v2+json"
+        )
+        
+        result = __import__("json").loads(converted)
+        assert result["schemaVersion"] == 2
+    
+    def test_convert_manifest_invalid_json(self, client):
+        """Test that invalid JSON returns original manifest."""
+        invalid_bytes = b"not valid json"
+        
+        result_bytes, result_type = client.convert_manifest(
+            invalid_bytes,
+            "application/vnd.oci.image.manifest.v1+json",
+            "application/vnd.docker.distribution.manifest.v2+json"
+        )
+        
+        # Should return original on error
+        assert result_bytes == invalid_bytes
+        assert result_type == "application/vnd.oci.image.manifest.v1+json"
+    
+    def test_convert_manifest_index(self, client):
+        """Test converting manifest index/list with sub-manifests."""
+        index = {
+            "schemaVersion": 2,
+            "manifests": [
+                {
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "digest": "sha256:abc",
+                    "size": 1234,
+                    "platform": {"os": "linux", "architecture": "amd64"}
+                }
+            ]
+        }
+        
+        converted, _ = client.convert_manifest(
+            __import__("json").dumps(index).encode(),
+            "application/vnd.oci.image.index.v1+json",
+            "application/vnd.docker.distribution.manifest.list.v2+json"
+        )
+        
+        result = __import__("json").loads(converted)
+        assert result["manifests"][0]["mediaType"] == "application/vnd.docker.distribution.manifest.v2+json"
+

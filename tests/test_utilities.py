@@ -5,9 +5,11 @@ Tests the logger, exceptions, and decorators in the utilities package.
 """
 import pytest
 import logging
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+from rich.console import Console
 
-from utilities.logger import get_logger, set_global_level
+from utilities.logger import get_logger, set_log_file, set_global_level, set_console, get_console
 from utilities.exceptions import (
     MigratorError,
     ConfigurationError,
@@ -20,9 +22,9 @@ from utilities.exceptions import (
 from utilities.decorators import retry, log_operation
 
 
-class TestLogger:
-    """Tests for logger module."""
-    
+class TestGetLogger:
+    """Tests for get_logger function."""
+
     def test_get_logger(self):
         """Test getting a logger."""
         logger = get_logger("test_module")
@@ -33,17 +35,96 @@ class TestLogger:
         logger = get_logger("test_level", level=logging.DEBUG)
         assert logger.level == logging.DEBUG
     
+    def test_get_logger_returns_logger(self):
+        """Test that get_logger returns a Logger instance."""
+        logger = get_logger("test_module")
+        assert isinstance(logger, logging.Logger)
+    
+    def test_get_logger_name_includes_module(self):
+        """Test that logger name includes the module."""
+        logger = get_logger("mymodule")
+        assert "mymodule" in logger.name
+    
     def test_get_logger_idempotent(self):
-        """Test getting same logger twice returns same instance."""
+        """Test that same name returns consistent logger."""
         logger1 = get_logger("same_module")
         logger2 = get_logger("same_module")
         assert logger1 is logger2
+
+
+class TestSetGlobalLevel:
+    """Tests for set_global_level function."""
     
-    def test_set_global_level(self):
-        """Test setting global log level."""
-        set_global_level(logging.WARNING)
-        set_global_level(logging.INFO)
+    def test_set_global_level_debug(self):
+        """Test setting debug logging level."""
         set_global_level(logging.DEBUG)
+        logger = get_logger("debug_test")
+        assert logger.level <= logging.DEBUG
+    
+    def test_set_global_level_info(self):
+        """Test setting info logging level."""
+        set_global_level(logging.INFO)
+        logger = get_logger("info_test")
+        assert logger.level <= logging.INFO
+
+
+class TestSetLogFile:
+    """Tests for set_log_file function."""
+    
+    def test_set_log_file_with_path(self, tmp_path):
+        """Test setting log file with a path."""
+        log_file = tmp_path / "test.log"
+        set_log_file(log_file)
+        
+        # Log something
+        logger = get_logger("test_file_logger")
+        logger.info("Test message for file")
+    
+    def test_set_log_file_with_string_path(self, tmp_path):
+        """Test setting log file with a string path."""
+        log_file = str(tmp_path / "test_string.log")
+        set_log_file(log_file)
+    
+    def test_set_log_file_with_none(self):
+        """Test clearing log file with None."""
+        set_log_file(None)
+
+
+class TestSetConsole:
+    """Tests for set_console and get_console functions."""
+    
+    def test_set_console(self):
+        """Test setting a custom console."""
+        custom_console = Console()
+        set_console(custom_console)
+        assert get_console() is custom_console
+    
+    def test_get_console_creates_default(self):
+        """Test that get_console creates a default console."""
+        console = get_console()
+        assert isinstance(console, Console)
+
+
+class TestLoggerIntegration:
+    """Integration tests for logger functionality."""
+    
+    def test_logger_can_log_messages(self):
+        """Test that logger can log various levels."""
+        logger = get_logger("integration_test")
+        
+        # These should not raise
+        logger.debug("Debug message")
+        logger.info("Info message")
+        logger.warning("Warning message")
+        logger.error("Error message")
+    
+    def test_multiple_loggers_independent(self):
+        """Test that different module loggers are independent."""
+        logger1 = get_logger("module_a")
+        logger2 = get_logger("module_b")
+        
+        assert logger1 is not logger2
+        assert logger1.name != logger2.name
 
 
 class TestMigratorError:

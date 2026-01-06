@@ -281,6 +281,51 @@ class TestMigrationConfig:
             source=source, destination=dest, skip_charts=True
         )
         assert config_skip.skip_charts is True
+    
+    def test_skip_images_option(self):
+        """Test skip_images configuration option."""
+        source = RegistryCredentials(
+            registry="source.io", username="u", password="p"
+        )
+        dest = RegistryCredentials(
+            registry="dest.io", username="u", password="p"
+        )
+        
+        # Default is False
+        config_default = MigrationConfig(source=source, destination=dest)
+        assert config_default.skip_images is False
+        
+        # Can be set to True
+        config_skip = MigrationConfig(
+            source=source, destination=dest, skip_images=True
+        )
+        assert config_skip.skip_images is True
+    
+    def test_scan_concurrency_option(self):
+        """Test scan_concurrency configuration option."""
+        source = RegistryCredentials(
+            registry="source.io", username="u", password="p"
+        )
+        dest = RegistryCredentials(
+            registry="dest.io", username="u", password="p"
+        )
+        
+        # Default is 10
+        config_default = MigrationConfig(source=source, destination=dest)
+        assert config_default.scan_concurrency == 10
+        
+        # Can be set within bounds
+        config_custom = MigrationConfig(
+            source=source, destination=dest, scan_concurrency=25
+        )
+        assert config_custom.scan_concurrency == 25
+        
+        # Test bounds
+        with pytest.raises(ValidationError):
+            MigrationConfig(source=source, destination=dest, scan_concurrency=0)
+        
+        with pytest.raises(ValidationError):
+            MigrationConfig(source=source, destination=dest, scan_concurrency=51)
 
 
 class TestImageReference:

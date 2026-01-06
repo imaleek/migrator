@@ -145,18 +145,31 @@ Options:
     --include, -i             Regex to include repositories
     --exclude, -e             Regex to exclude repositories
     --skip-charts             Skip Helm chart migration (images only)
+    --skip-images             Skip container image migration (charts only)
 
   Performance:
     --resume/--no-resume      Resume from checkpoint (default: enabled)
     --state-dir PATH          State file directory (default: .migrator-state)
     --layer-concurrency, -lc  Parallel layer transfers per image (1-10, default: 3)
+    --scan-concurrency, -sc   Parallel repository scans (1-50, default: 10)
 
   Output:
     --verbose, -v             Enable verbose output
     --debug                   Enable debug logging
+    --log-file PATH           Write logs to file (keeps console clean for progress)
 ```
 
 > **Note**: Some registries (e.g., Huawei SWR Basic Edition) do not support OCI Helm charts. Use `--skip-charts` to migrate only container images.
+
+### Helm Chart Detection
+
+The tool identifies Helm charts using multiple methods:
+
+- **Media types**: Standard CNCF Helm chart media types in config/layers
+- **OCI annotations**: Detects charts with `description` containing "helm chart"
+- **Config inspection**: Checks for Helm-specific config types
+
+This ensures accurate detection even for charts stored in non-standard ways (e.g., Istio charts).
 
 ## Architecture
 
