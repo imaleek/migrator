@@ -59,6 +59,21 @@ class TestRegistryClientAuth:
     def client(self, sample_registry_credentials):
         return RegistryClient(sample_registry_credentials)
     
+    @pytest.fixture
+    def jwt_credentials(self):
+        """Credentials with a JWT token as password (like Huawei SWR)."""
+        # This is a mock JWT token (header.payload.signature format)
+        jwt_token = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123"
+        return RegistryCredentials(
+            registry="swr.myhuaweicloud.com",
+            username="user123",
+            password=jwt_token,
+        )
+    
+    @pytest.fixture
+    def jwt_client(self, jwt_credentials):
+        return RegistryClient(jwt_credentials)
+    
     def test_basic_auth_header(self, client):
         """Test basic auth header generation."""
         headers = client._get_auth_header()
@@ -70,6 +85,60 @@ class TestRegistryClientAuth:
         client._token = "test-bearer-token"
         headers = client._get_auth_header()
         assert headers["Authorization"] == "Bearer test-bearer-token"
+    
+    def test_is_jwt_token_valid(self, client):
+        """Test JWT token detection with valid JWT."""
+        # Valid JWT format: header.payload.signature starting with eyJ
+        jwt = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature"
+        assert client._is_jwt_token(jwt) is True
+    
+    def test_is_jwt_token_empty(self, client):
+        """Test JWT detection with empty string."""
+        assert client._is_jwt_token("") is False
+    
+    def test_is_jwt_token_regular_password(self, client):
+        """Test JWT detection with regular password."""
+        assert client._is_jwt_token("my-password-123") is False
+    
+    def test_is_jwt_token_only_two_parts(self, client):
+        """Test JWT detection with invalid format (only 2 parts)."""
+        # JWT must have exactly 3 parts
+        assert client._is_jwt_token("eyJhbGciOiJSUzI1.eyJzdWIiOiIxMjM0NTY3ODkwIn0") is False
+    
+    def test_is_jwt_token_not_starting_with_eyj(self, client):
+        """Test JWT detection when not starting with eyJ."""
+        assert client._is_jwt_token("abc.def.ghi") is False
+    
+    def test_is_jwt_token_none(self, client):
+        """Test JWT detection with None-like empty value."""
+        assert client._is_jwt_token(None) is False if hasattr(client._is_jwt_token, '__call__') else True
+    
+    def test_jwt_password_uses_basic_auth(self, jwt_client):
+        """Test that JWT password is used in Basic auth (not Bearer directly).
+        
+        JWT passwords (like Huawei SWR long-term credentials) should be used
+        as the password in Basic auth. The token exchange via _handle_auth_challenge
+        will then obtain a proper Bearer token.
+        """
+        headers = jwt_client._get_auth_header()
+        # Should be Basic auth, NOT Bearer directly
+        assert headers["Authorization"].startswith("Basic ")
+        # The password (JWT) should be base64 encoded along with username
+        import base64
+        auth_string = f"{jwt_client.credentials.username}:{jwt_client.credentials.password}"
+        expected_encoded = base64.b64encode(auth_string.encode()).decode()
+        assert headers["Authorization"] == f"Basic {expected_encoded}"
+    
+    def test_jwt_password_does_not_set_token(self, jwt_client):
+        """Test that JWT password does NOT set _token directly.
+        
+        The token should only be set via _handle_auth_challenge after
+        proper token exchange with the registry's auth endpoint.
+        """
+        assert jwt_client._token is None
+        jwt_client._get_auth_header()
+        # Token should still be None - will be set by _handle_auth_challenge
+        assert jwt_client._token is None
     
     @pytest.mark.asyncio
     async def test_handle_auth_challenge_bearer(self, client, mock_httpx_client):
@@ -88,6 +157,7 @@ class TestRegistryClientAuth:
         await client._handle_auth_challenge(mock_response, "repository:test:pull")
         
         assert client._token == "test-token"
+
 
 
 class TestRegistryClientConnection:

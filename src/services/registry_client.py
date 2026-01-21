@@ -143,6 +143,7 @@ class RegistryClient:
         self._client: httpx.AsyncClient | None = None
         self._token: str | None = None
         self._token_expiry: float = 0
+        self._token_scope: str | None = None  # Track current token scope
 
     @property
     def base_url(self) -> str:
@@ -185,12 +186,40 @@ class RegistryClient:
             self._client = None
             logger.debug(f"Disconnected from registry: {self.registry}")
 
+    def _is_jwt_token(self, value: str) -> bool:
+        """
+        Check if a value is a JWT token.
+
+        JWT tokens have the format: header.payload.signature
+        where each part is base64url encoded. The header always starts
+        with '{"' which encodes to 'eyJ'.
+
+        This is a generic detection that works for any registry that uses
+        JWT tokens as credentials (Huawei SWR, Harbor with OIDC, etc).
+
+        Args:
+            value: The string to check
+
+        Returns:
+            True if the value appears to be a JWT token
+        """
+        if not value:
+            return False
+        # JWT tokens start with 'eyJ' (base64url encoding of '{"')
+        if value.startswith("eyJ"):
+            parts = value.split(".")
+            # Valid JWTs have exactly 3 parts: header.payload.signature
+            return len(parts) == 3
+        return False
+
     def _get_auth_header(self) -> dict[str, str]:
         """Get the authorization header."""
         if self._token:
             return {"Authorization": f"Bearer {self._token}"}
 
-        # Basic auth fallback
+        # Use Basic auth - for JWT passwords (like Huawei SWR), the JWT is used
+        # as the password in Basic auth, and the token exchange will happen
+        # via _handle_auth_challenge when we get a 401 response
         auth_string = f"{self.credentials.username}:{self.credentials.password}"
         encoded = base64.b64encode(auth_string.encode()).decode()
         return {"Authorization": f"Basic {encoded}"}
@@ -240,12 +269,59 @@ class RegistryClient:
         if token_response.status_code == 200:
             data = token_response.json()
             self._token = data.get("token") or data.get("access_token")
-            logger.debug("Obtained auth token")
+            self._token_scope = scope  # Track the scope we requested
+            logger.debug(f"Obtained auth token with scope: {scope}")
         else:
             raise RegistryAuthenticationError(
                 self.registry,
                 f"Token request failed: {token_response.status_code}"
             )
+
+    async def ensure_repo_access(self, repository: str, push: bool = False) -> None:
+        """
+        Ensure we have a token with access to a repository.
+        
+        This method follows the docker login pattern:
+        1. Make request WITHOUT auth to get proper Bearer challenge
+        2. Exchange credentials for token with appropriate scope
+        
+        This is needed because some registries (like Huawei SWR) return
+        different challenges depending on whether auth is sent. By requesting
+        without auth first, we get the Bearer challenge with realm URL.
+        
+        Args:
+            repository: Repository name to get access for
+            push: If True, request pull,push scope; otherwise just pull
+        """
+        required_scope = f"repository:{repository}:pull,push" if push else f"repository:{repository}:pull"
+        
+        # Check if we already have a token with the required scope
+        if self._token and self._token_scope:
+            # If we have pull,push scope and only need pull, that's fine
+            if self._token_scope == required_scope:
+                logger.debug(f"Already have token with scope: {required_scope}")
+                return
+            # If we have pull,push and need pull, that's fine
+            if push is False and "pull,push" in self._token_scope and repository in self._token_scope:
+                logger.debug(f"Existing token scope {self._token_scope} covers {required_scope}")
+                return
+            
+        # Make request without auth to get Bearer challenge
+        response = await self._client.get(f"{self.base_url}/")
+        
+        if response.status_code == 401:
+            # Get token with appropriate scope for this repository
+            await self._handle_auth_challenge(response, required_scope)
+            logger.debug(f"Obtained {'push' if push else 'pull'} access token for {repository}")
+        elif response.status_code == 200:
+            # Already authenticated or registry doesn't need it
+            logger.debug(f"Already have access to {self.registry}")
+
+    async def ensure_push_access(self, repository: str) -> None:
+        """Ensure we have a token with push access for a repository."""
+        await self.ensure_repo_access(repository, push=True)
+
+
 
     @retry(
         stop=stop_after_attempt(3),
@@ -264,13 +340,15 @@ class RegistryClient:
         """
         try:
             logger.debug(f"Checking connectivity to {self.registry}")
-            response = await self._client.get(
-                f"{self.base_url}/",
-                headers=self._get_auth_header(),
-            )
+            
+            # First request WITHOUT auth to get the proper challenge header
+            # Some registries (like Huawei SWR) return different challenges
+            # depending on whether auth is sent. We need the Bearer challenge
+            # to get the realm URL for token exchange.
+            response = await self._client.get(f"{self.base_url}/")
 
             if response.status_code == 401:
-                # Need to authenticate
+                # Need to authenticate - get token via challenge
                 await self._handle_auth_challenge(response)
                 response = await self._client.get(
                     f"{self.base_url}/",
@@ -464,6 +542,10 @@ class RegistryClient:
         Returns:
             Tuple of (ManifestInfo, raw_manifest_bytes)
         """
+        # Ensure we have pull access before making the request
+        # This follows the docker login pattern for registries like Huawei SWR
+        await self.ensure_repo_access(repository, push=False)
+        
         url = f"{self.base_url}/{quote(repository, safe='/')}/manifests/{reference}"
 
         headers = self._get_auth_header()
@@ -472,10 +554,13 @@ class RegistryClient:
         response = await self._client.get(url, headers=headers)
 
         if response.status_code == 401:
+            # Token may have expired or need refresh for this specific repo
             await self._handle_auth_challenge(
                 response,
                 f"repository:{repository}:pull"
             )
+            headers = self._get_auth_header()
+            headers["Accept"] = ", ".join(self.MANIFEST_TYPES)
             response = await self._client.get(url, headers=headers)
 
         if response.status_code != 200:
@@ -1152,6 +1237,10 @@ class RegistryClient:
             Total bytes transferred
         """
         total_bytes = 0
+
+        # Ensure destination client has push access before any upload operations
+        # This obtains a token with pull,push scope for the destination repository
+        await dest_client.ensure_push_access(dest_repo)
 
         # Get source manifest
         manifest_info, manifest_data = await self.get_manifest(source_repo, source_ref)
