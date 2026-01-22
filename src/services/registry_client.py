@@ -294,16 +294,17 @@ class RegistryClient:
             push: If True, request pull,push scope; otherwise just pull
         """
         required_scope = f"repository:{repository}:pull,push" if push else f"repository:{repository}:pull"
+        push_scope_for_repo = f"repository:{repository}:pull,push"
         
         # Check if we already have a token with the required scope
         if self._token and self._token_scope:
-            # If we have pull,push scope and only need pull, that's fine
+            # Exact match - we have exactly what we need
             if self._token_scope == required_scope:
                 logger.debug(f"Already have token with scope: {required_scope}")
                 return
-            # If we have pull,push and need pull, that's fine
-            if push is False and "pull,push" in self._token_scope and repository in self._token_scope:
-                logger.debug(f"Existing token scope {self._token_scope} covers {required_scope}")
+            # If we have pull,push for THIS repo and only need pull, that's fine
+            if push is False and self._token_scope == push_scope_for_repo:
+                logger.debug(f"Existing push scope covers pull for {repository}")
                 return
             
         # Make request without auth to get Bearer challenge
@@ -667,6 +668,11 @@ class RegistryClient:
             if "schemaVersion" not in manifest:
                 manifest["schemaVersion"] = 2
             
+            # Update root mediaType field if present
+            # This is critical for registries like Huawei SWR that validate this
+            if "mediaType" in manifest:
+                manifest["mediaType"] = target_media_type
+            
             # Convert config media type
             if "config" in manifest and "mediaType" in manifest["config"]:
                 old_config_type = manifest["config"]["mediaType"]
@@ -709,6 +715,9 @@ class RegistryClient:
         Returns:
             True if blob exists
         """
+        # Ensure we have pull access before checking
+        await self.ensure_repo_access(repository, push=False)
+        
         url = f"{self.base_url}/{quote(repository, safe='/')}/blobs/{digest}"
 
         response = await self._client.head(
@@ -743,6 +752,9 @@ class RegistryClient:
         Yields:
             Chunks of blob data
         """
+        # Ensure we have pull access before streaming
+        await self.ensure_repo_access(repository, push=False)
+        
         url = f"{self.base_url}/{quote(repository, safe='/')}/blobs/{digest}"
 
         async with self._client.stream(
@@ -850,6 +862,9 @@ class RegistryClient:
     ) -> None:
         """Single attempt to upload a blob."""
         import asyncio  # Local import to avoid issues
+        
+        # Ensure we have push access before uploading
+        await self.ensure_push_access(repository)
         
         # Start upload session
         url = f"{self.base_url}/{quote(repository, safe='/')}/blobs/uploads/"
@@ -1093,15 +1108,27 @@ class RegistryClient:
         current_manifest = manifest
         current_media_type = media_type
         conversion_attempted = False
+        current_reference = reference
+        
+        # Check if reference is a digest - we can't convert if so since digest must match content
+        is_digest_ref = reference.startswith("sha256:")
 
         while True:
             try:
                 return await self._upload_manifest_with_retry(
-                    repository, reference, current_manifest, current_media_type
+                    repository, current_reference, current_manifest, current_media_type
                 )
             except ImageTransferError as e:
-                # Check if this is a 400 error and we haven't tried conversion yet
-                if "400" in str(e) and not conversion_attempted and current_media_type in self.MANIFEST_CONVERSIONS:
+                # Check if this is a 400 error and we can try conversion
+                # Don't attempt conversion if reference is a digest (content must match)
+                can_convert = (
+                    "400" in str(e) and 
+                    not conversion_attempted and 
+                    current_media_type in self.MANIFEST_CONVERSIONS and
+                    not is_digest_ref
+                )
+                
+                if can_convert:
                     conversion_attempted = True
                     target_media_type = self.MANIFEST_CONVERSIONS[current_media_type]
                     logger.info(
@@ -1294,12 +1321,8 @@ class RegistryClient:
                     layer_digest = layer["digest"]
                     layer_media_type = layer.get("mediaType", "application/octet-stream")
 
-                    # Check blob cache first
-                    if blob_cache and blob_cache.exists(layer_digest):
-                        logger.debug(f"Layer {layer_digest[:16]} in cache, skipping")
-                        return 0
-
-                    # Check if layer exists in destination
+                    # Always verify blob exists in destination (don't trust cache alone)
+                    # Cache from previous sessions may have stale entries
                     if await dest_client.blob_exists(dest_repo, layer_digest):
                         logger.debug(f"Layer {layer_digest[:16]} already exists, skipping")
                         if blob_cache:
