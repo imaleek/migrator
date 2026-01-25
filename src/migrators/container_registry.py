@@ -515,6 +515,31 @@ class ContainerRegistryMigrator(BaseMigrator):
                     "Helm clients not initialized"
                 )
 
+            # Check if chart exists in destination (skip if configured)
+            if self.config.skip_existing:
+                try:
+                    # Build destination repository path for the chart
+                    if dest_prefix:
+                        dest_chart_repo = f"{dest_prefix}/{chart.name}"
+                    else:
+                        dest_chart_repo = chart.name
+                    
+                    manifest, _ = await self._dest_client.get_manifest(
+                        dest_chart_repo, chart.version
+                    )
+                    if manifest:
+                        logger.debug(f"Chart already exists, skipping: {dest_ref}")
+                        self.console.show_item_skipped(chart.full_reference)
+                        return MigrationResult(
+                            source=source_ref,
+                            destination=dest_ref,
+                            success=True,
+                            skipped=True,
+                            duration_seconds=time.time() - start_time,
+                        )
+                except ImageTransferError:
+                    pass  # Chart doesn't exist, proceed with migration
+
             # Copy the chart with destination namespace
             bytes_transferred = await self._source_helm.copy_chart(
                 chart,
