@@ -1,42 +1,53 @@
-# Migrator
+<p align="center">
+  <h1 align="center">🚀 Migrator</h1>
+  <p align="center">
+    <strong>High-performance container registry migration tool</strong>
+  </p>
+  <p align="center">
+    Efficiently migrate container images and Helm charts between any OCI-compliant registries
+  </p>
+</p>
 
-🚀 **A modular CLI application for efficient data migration between systems.**
+<p align="center">
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+"></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+  <a href="#"><img src="https://img.shields.io/badge/coverage-90%25+-brightgreen.svg" alt="Coverage"></a>
+  <a href="#"><img src="https://img.shields.io/badge/tests-243%20passed-success.svg" alt="Tests"></a>
+</p>
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+---
 
-## Overview
+## ✨ Features
 
- Migrator is a powerful, extensible CLI tool designed for migrating data between systems. The first supported migration type is **Container Registry Migration**, enabling efficient transfer of container images and Helm charts between any OCI-compliant registries.
+- **🐳 Direct Registry Transfer** — No Docker daemon required. Uses Registry HTTP API v2 directly for maximum efficiency
+- **⚡ Parallel Processing** — Configurable parallelism at both image and layer levels
+- **🔄 Resume Capability** — Automatic checkpoint saving enables seamless recovery from interruptions
+- **💾 Smart Blob Caching** — Reduces redundant checks for shared base layers across images
+- **📊 Beautiful CLI** — Rich console UI with progress bars, spinners, and detailed summaries
+- **🎯 Flexible Filtering** — Include/exclude patterns for selective migration
+- **🔐 Universal Authentication** — Basic auth, Bearer tokens, and JWT support for all major registries
+- **📦 Helm Chart Support** — Full OCI-based Helm chart migration alongside container images
+- **🔁 Format Conversion** — Automatic OCI ↔ Docker manifest format conversion when needed
+- **🏗️ Extensible Architecture** — Plugin-based design for adding new migration types
 
-### Key Features
+## 🎯 Supported Registries
 
-- 🐳 **Container Registry Migration** - Migrate images and Helm charts between registries
-- ⚡ **High Performance** - Direct HTTP API v2 transfers (no Docker daemon required)
-- 🔄 **Parallel Processing** - Configurable parallel jobs and layer-level concurrency
-- 🔁 **Resume Capability** - Continue interrupted migrations from checkpoint
-- 💾 **Smart Caching** - Blob cache reduces redundant checks for shared layers
-- 📊 **Beautiful CLI** - Animated progress bars, spinners, and summary reports
-- 🎯 **Flexible Filtering** - Include/exclude patterns for selective migration
-- 🔒 **Universal Registry Support** - Works with any OCI-compliant registry
+| Registry | Status | Notes |
+|----------|:------:|-------|
+| **Docker Hub** | ✅ | Full support |
+| **Harbor** | ✅ | Full support |
+| **Azure Container Registry (ACR)** | ✅ | Full support |
+| **Amazon ECR** | ✅ | Full support |
+| **Google Container Registry (GCR)** | ✅ | Full support |
+| **Google Artifact Registry (GAR)** | ✅ | Full support |
+| **GitHub Container Registry (GHCR)** | ✅ | Full support |
+| **Quay.io** | ✅ | Full support |
+| **Huawei SWR** | ✅ | Images only (no OCI charts) |
+| **Any OCI Registry** | ✅ | Via standard API v2 |
 
-### Supported Registries
+## 📦 Installation
 
-| Registry | Tested | Notes |
-|----------|--------|-------|
-| Docker Hub | ✅ | Full support |
-| Harbor | ✅ | Full support |
-| Azure Container Registry (ACR) | ✅ | Full support |
-| Amazon ECR | ✅ | Full support |
-| Google Container Registry (GCR) | ✅ | Full support |
-| Google Artifact Registry (GAR) | ✅ | Full support |
-| GitHub Container Registry (GHCR) | ✅ | Full support |
-| Quay.io | ✅ | Full support |
-| Any OCI Registry | ✅ | Via standard API v2 |
-
-## Installation
-
-### From Source
+### From Source (Recommended for Development)
 
 ```bash
 # Clone the repository
@@ -45,27 +56,51 @@ cd migrator
 
 # Create virtual environment
 python -m venv venv
-source venv/bin/activate  # Linux/Mac
+source venv/bin/activate  # Linux/macOS
 # or
 .\venv\Scripts\activate   # Windows
 
-# Install in development mode
+# Install with development dependencies
 pip install -e ".[dev]"
+
+# Verify installation
+migrator --help
 ```
 
-### Dependencies
-
-The tool automatically uses:
-
-- **Direct Registry API v2** for container images (no Docker required)
-- **Helm CLI** for Helm chart migration (Helm 3.8+ required)
-
-## Usage
-
-### Container Registry Migration
+### Using pip
 
 ```bash
-# Basic migration
+pip install migrator
+```
+
+### Standalone Binary (Linux)
+
+Build a standalone executable using Docker:
+
+```bash
+# Build the binary
+./build.ps1  # Windows PowerShell
+# or
+docker build -t migrator-builder . && docker cp $(docker create migrator-builder):/app/dist/migrator ./migrator
+
+# Run
+./migrator --help
+```
+
+### Requirements
+
+| Dependency | Purpose | Required |
+|------------|---------|:--------:|
+| **Python 3.10+** | Runtime | ✅ |
+| **Helm 3.8+** | Helm chart migration | Optional |
+
+> **Note**: Docker is **not required** for image migration. The tool uses the Registry HTTP API v2 directly.
+
+## 🚀 Quick Start
+
+### Basic Migration
+
+```bash
 migrator migrate container-registry \
     --source-registry harbor.old.io \
     --source-user admin \
@@ -73,20 +108,11 @@ migrator migrate container-registry \
     --destination-registry harbor.new.io \
     --destination-user admin \
     --destination-password secret
+```
 
-# With filtering and parallel jobs
-migrator migrate container-registry \
-    --source-registry gcr.io/myproject \
-    --source-user _json_key \
-    --source-password "$(cat service-account.json)" \
-    --destination-registry myregistry.azurecr.io \
-    --destination-user myuser \
-    --destination-password mytoken \
-    --include "^production-" \
-    --exclude ".*-dev$" \
-    --parallel 8
+### Dry Run (Preview Changes)
 
-# Dry run mode
+```bash
 migrator migrate container-registry \
     --source-registry source.registry.io \
     --source-user user \
@@ -95,18 +121,27 @@ migrator migrate container-registry \
     --destination-user user \
     --destination-password pass \
     --dry-run
+```
 
-# Resume an interrupted migration (automatic)
+### With Filtering
+
+```bash
+# Only migrate production images, exclude dev/test
 migrator migrate container-registry \
-    --source-registry source.registry.io \
-    --source-user user \
-    --source-password pass \
-    --destination-registry dest.registry.io \
-    --destination-user user \
-    --destination-password pass
-# Will automatically resume from last checkpoint if interrupted
+    --source-registry gcr.io/myproject \
+    --source-user _json_key \
+    --source-password "$(cat service-account.json)" \
+    --destination-registry myregistry.azurecr.io \
+    --destination-user myuser \
+    --destination-password mytoken \
+    --include "^production-" \
+    --exclude ".*-(dev|test)$" \
+    --parallel 8
+```
 
-# High performance with increased parallelism
+### High-Performance Migration
+
+```bash
 migrator migrate container-registry \
     --source-registry source.registry.io \
     --source-user user \
@@ -115,63 +150,179 @@ migrator migrate container-registry \
     --destination-user user \
     --destination-password pass \
     --parallel 10 \
-    --layer-concurrency 5
+    --layer-concurrency 5 \
+    --scan-concurrency 20
 ```
 
-### Command Options
+### Migrate Only Images (Skip Helm Charts)
 
-```
-Options:
-  Source Registry:
-    --source-registry, -sr    Source registry URL
-    --source-user, -su        Source registry username
-    --source-password, -sp    Source registry password
-    --source-insecure         Allow HTTP connection
-    --source-namespace, -sn   Source namespace/project prefix
-
-  Destination Registry:
-    --destination-registry, -dr    Destination registry URL
-    --destination-user, -du        Destination registry username
-    --destination-password, -dp    Destination registry password
-    --destination-insecure         Allow HTTP connection
-    --destination-namespace, -dn   Destination namespace/project prefix
-
-  Migration Options:
-    --parallel, -p            Parallel jobs (1-20, default: 4)
-    --dry-run, -n             Simulate without changes
-    --skip-existing           Skip existing images (default: true)
-
-  Filtering:
-    --include, -i             Regex to include repositories
-    --exclude, -e             Regex to exclude repositories
-    --skip-charts             Skip Helm chart migration (images only)
-    --skip-images             Skip container image migration (charts only)
-
-  Performance:
-    --resume/--no-resume      Resume from checkpoint (default: enabled)
-    --state-dir PATH          State file directory (default: .migrator-state)
-    --layer-concurrency, -lc  Parallel layer transfers per image (1-10, default: 3)
-    --scan-concurrency, -sc   Parallel repository scans (1-50, default: 10)
-
-  Output:
-    --verbose, -v             Enable verbose output
-    --debug                   Enable debug logging
-    --log-file PATH           Write logs to file (keeps console clean for progress)
+```bash
+migrator migrate container-registry \
+    --source-registry source.registry.io \
+    --source-user user \
+    --source-password pass \
+    --destination-registry dest.registry.io \
+    --destination-user user \
+    --destination-password pass \
+    --skip-charts
 ```
 
-> **Note**: Some registries (e.g., Huawei SWR Basic Edition) do not support OCI Helm charts. Use `--skip-charts` to migrate only container images.
+### Migrate Only Helm Charts (Skip Images)
 
-### Helm Chart Detection
+```bash
+migrator migrate container-registry \
+    --source-registry source.registry.io \
+    --source-user user \
+    --source-password pass \
+    --destination-registry dest.registry.io \
+    --destination-user user \
+    --destination-password pass \
+    --skip-images
+```
 
-The tool identifies Helm charts using multiple methods:
+## ⚙️ Command Reference
 
-- **Media types**: Standard CNCF Helm chart media types in config/layers
-- **OCI annotations**: Detects charts with `description` containing "helm chart"
-- **Config inspection**: Checks for Helm-specific config types
+### `migrator migrate container-registry`
 
-This ensures accurate detection even for charts stored in non-standard ways (e.g., Istio charts).
+Main command for migrating container images and Helm charts.
 
-## Architecture
+#### Source Registry Options
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--source-registry` | `-sr` | Source registry URL (e.g., `harbor.io/project`) |
+| `--source-user` | `-su` | Source registry username |
+| `--source-password` | `-sp` | Source registry password |
+| `--source-insecure` | | Allow HTTP (insecure) connection |
+| `--source-namespace` | `-sn` | Source namespace/project prefix |
+
+#### Destination Registry Options
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--destination-registry` | `-dr` | Destination registry URL |
+| `--destination-user` | `-du` | Destination registry username |
+| `--destination-password` | `-dp` | Destination registry password |
+| `--destination-insecure` | | Allow HTTP (insecure) connection |
+| `--destination-namespace` | `-dn` | Destination namespace/project prefix |
+
+#### Migration Options
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--parallel` | `-p` | 4 | Parallel image migrations (1-20) |
+| `--dry-run` | `-n` | false | Simulate without making changes |
+| `--skip-existing` | | true | Skip images that already exist in destination |
+
+#### Filtering Options
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--include` | `-i` | Regex pattern to include repositories |
+| `--exclude` | `-e` | Regex pattern to exclude repositories |
+| `--skip-charts` | | Skip Helm chart migration (images only) |
+| `--skip-images` | | Skip container image migration (charts only) |
+
+#### Performance Options
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--resume/--no-resume` | | enabled | Resume from checkpoint if interrupted |
+| `--state-dir` | | `.migrator-state` | Directory for state files |
+| `--layer-concurrency` | `-lc` | 3 | Parallel layer transfers per image (1-10) |
+| `--scan-concurrency` | `-sc` | 10 | Parallel repository scans (1-50) |
+
+#### Output Options
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--verbose` | `-v` | Enable verbose output |
+| `--debug` | | Enable debug logging |
+| `--log-file` | | Write logs to file (keeps console clean) |
+
+### `migrator info`
+
+Display system information and tool availability.
+
+```bash
+migrator info
+```
+
+## 🔄 How It Works
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant CLI
+    participant Migrator
+    participant Source as Source Registry
+    participant Dest as Destination Registry
+
+    User->>CLI: migrator migrate container-registry
+    CLI->>Migrator: Initialize with config
+    
+    rect rgb(40, 40, 80)
+        Note over Migrator,Source: Discovery Phase
+        Migrator->>Source: Authenticate
+        Migrator->>Dest: Authenticate
+        Migrator->>Source: List repositories
+        Migrator->>Source: Get tags (parallel)
+        Migrator->>Source: Inspect manifests
+    end
+    
+    rect rgb(40, 80, 40)
+        Note over Migrator,Dest: Migration Phase (parallel)
+        loop For each image
+            Migrator->>Dest: Check if exists (skip if so)
+            Migrator->>Source: Get manifest
+            Migrator->>Source: Stream layers (parallel)
+            Migrator->>Dest: Upload layers
+            Migrator->>Dest: Push manifest
+            Migrator->>Migrator: Save checkpoint
+        end
+    end
+    
+    Migrator->>CLI: Return summary
+    CLI->>User: Display results
+```
+
+### Key Concepts
+
+#### Direct Registry Transfer
+
+Unlike tools that pull images locally and push them, Migrator streams data directly from source to destination:
+
+```
+Source Registry → [Migrator] → Destination Registry
+                    ↓
+              (streaming, no local storage)
+```
+
+#### Smart Blob Caching
+
+Base image layers (like `alpine:latest`) are often shared across many images. Migrator's blob cache tracks which blobs already exist in the destination, dramatically reducing redundant transfers:
+
+```
+Image A: [layer1, layer2, layer3]  ← layer1 uploaded
+Image B: [layer1, layer4, layer5]  ← layer1 skipped (cached)
+Image C: [layer1, layer2, layer6]  ← layer1, layer2 skipped (cached)
+```
+
+#### Resume Capability
+
+Migration state is checkpointed to disk. If interrupted, simply run the same command again:
+
+```bash
+# First run (interrupted at 50%)
+migrator migrate container-registry ...
+# ^C
+
+# Resume automatically continues from checkpoint
+migrator migrate container-registry ...
+# → Resuming migration: 500/1000 items already processed
+```
+
+## 🏗️ Architecture
 
 ```
 migrator/
@@ -181,55 +332,72 @@ migrator/
 │   ├── console/
 │   │   └── __init__.py            # Rich console UI components
 │   ├── migrators/
-│   │   ├── __init__.py            # Base migrator class
+│   │   ├── __init__.py            # Base migrator class (ABC)
 │   │   └── container_registry.py  # Container registry migrator
 │   ├── services/
 │   │   ├── registry_client.py     # Docker Registry API v2 client
 │   │   ├── helm_client.py         # Helm OCI registry client
 │   │   ├── migration_state.py     # State persistence for resume
-│   │   └── blob_cache.py          # Blob caching service
+│   │   └── blob_cache.py          # Blob existence caching
 │   └── utilities/
 │       ├── exceptions.py          # Custom exception hierarchy
-│       ├── logger.py              # Logging utilities
+│       ├── logger.py              # Rich logging utilities
 │       └── decorators.py          # Common decorators
-├── tests/                         # Test suite (211+ tests)
+├── tests/                         # Comprehensive test suite (243+ tests)
 ├── pyproject.toml                 # Project configuration
-└── README.md
+├── Dockerfile                     # Multi-stage build for standalone binary
+└── build.ps1                      # Windows build script
 ```
 
-### Extensibility
+### Extending Migrator
 
- Migrator is designed for extensibility. To add a new migration type:
+Migrator is designed for extensibility. To add a new migration type:
 
-1. Create a new migrator in `src/migrators/`
-2. Extend `BaseMigrator` class
-3. Add a new CLI command in `src/main.py`
-
-Example:
+1. Create a new migrator class extending `BaseMigrator`
+2. Implement the required abstract methods
+3. Add a CLI command in `main.py`
 
 ```python
 # src/migrators/database.py
 from migrators import BaseMigrator
+from config import MigrationResult
 
 class DatabaseMigrator(BaseMigrator):
     @property
     def name(self) -> str:
         return "Database"
     
-    async def discover(self):
-        # Discover tables/data
+    @property
+    def description(self) -> str:
+        return "Migrate database tables and data"
+    
+    async def validate_connection(self) -> bool:
+        # Validate source and destination connections
         pass
     
-    async def migrate_item(self, item):
-        # Migrate single item
+    async def discover(self) -> list:
+        # Discover tables/data to migrate
+        pass
+    
+    async def migrate_item(self, item) -> MigrationResult:
+        # Migrate a single table/record
         pass
     
     async def run(self):
-        # Execute migration
+        # Execute the complete migration
         pass
 ```
 
-## Development
+## 🧪 Development
+
+### Setup
+
+```bash
+# Clone and install
+git clone https://github.com/imaleek/migrator.git
+cd migrator
+pip install -e ".[dev]"
+```
 
 ### Running Tests
 
@@ -237,11 +405,14 @@ class DatabaseMigrator(BaseMigrator):
 # Run all tests
 pytest
 
-# With coverage
+# With coverage report
 pytest --cov=src --cov-report=html
 
-# Specific test file
+# Run specific test file
 pytest tests/test_registry_client.py -v
+
+# Run tests matching a pattern
+pytest -k "helm" -v
 ```
 
 ### Code Quality
@@ -253,42 +424,134 @@ ruff check src/
 # Type checking
 mypy src/
 
-# Format
+# Formatting
 ruff format src/
+
+# All checks
+ruff check src/ && mypy src/ && pytest
 ```
 
-## Migration Flow
+### Building Standalone Binary
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant CLI
-    participant Migrator
-    participant SourceRegistry
-    participant DestRegistry
+```bash
+# Windows (PowerShell)
+.\build.ps1
 
-    User->>CLI: migrator migrate container-registry
-    CLI->>Migrator: Initialize with config
-    Migrator->>SourceRegistry: Authenticate
-    Migrator->>DestRegistry: Authenticate
-    Migrator->>SourceRegistry: List repositories
-    Migrator->>SourceRegistry: List tags per repo
-    
-    loop For each image (parallel)
-        Migrator->>SourceRegistry: Get manifest
-        Migrator->>SourceRegistry: Stream layers
-        Migrator->>DestRegistry: Upload layers
-        Migrator->>DestRegistry: Upload manifest
-    end
-    
-    Migrator->>CLI: Return summary
-    CLI->>User: Display results
+# Using Docker directly
+docker build -t migrator-builder .
+docker create --name migrator-temp migrator-builder
+docker cp migrator-temp:/app/dist/migrator ./dist/migrator
+docker rm migrator-temp
 ```
 
-## License
+## 🔧 Troubleshooting
 
-MIT License - see [LICENSE](LICENSE) for details.
+### Common Issues
 
-## Contributing
+#### Authentication Failures
 
-Contributions are welcome! Please read our contributing guidelines before submitting PRs.
+```
+RegistryAuthenticationError: Authentication failed for registry.io
+```
+
+**Solutions:**
+
+- Verify credentials are correct
+- Check if the registry requires a specific username format (e.g., `_json_key` for GCR)
+- Ensure the user has pull access on source and push access on destination
+
+#### Manifest Format Errors
+
+```
+400 Bad Request: manifest invalid
+```
+
+**Solutions:**
+
+- Migrator automatically attempts format conversion (OCI ↔ Docker)
+- If the issue persists, check if the destination registry supports the manifest type
+- Use `--debug` flag for detailed error information
+
+#### Helm Chart Migration Fails
+
+```
+Helm clients not initialized
+```
+
+**Solutions:**
+
+- Ensure Helm 3.8+ is installed and in PATH
+- Run `helm version` to verify
+- Some registries (e.g., Huawei SWR Basic) don't support OCI charts; use `--skip-charts`
+
+#### Connection Timeouts
+
+```
+Connection timeout
+```
+
+**Solutions:**
+
+- Reduce `--parallel` and `--layer-concurrency` values
+- Check network connectivity to both registries
+- Use `--scan-concurrency 5` for slow registries
+
+### Debug Mode
+
+Enable detailed logging for troubleshooting:
+
+```bash
+migrator migrate container-registry \
+    --source-registry source.io \
+    --source-user user \
+    --source-password pass \
+    --destination-registry dest.io \
+    --destination-user user \
+    --destination-password pass \
+    --debug \
+    --log-file migration.log
+```
+
+## 📝 Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `MIGRATOR_SOURCE_PASSWORD` | Source registry password (alternative to CLI) |
+| `MIGRATOR_DEST_PASSWORD` | Destination registry password (alternative to CLI) |
+
+## 🤝 Contributing
+
+Contributions are welcome! Here's how to get started:
+
+1. **Fork** the repository
+2. **Clone** your fork: `git clone https://github.com/YOUR_USERNAME/migrator.git`
+3. **Create a branch**: `git checkout -b feature/amazing-feature`
+4. **Make changes** and add tests
+5. **Run tests**: `pytest`
+6. **Commit**: `git commit -m 'Add amazing feature'`
+7. **Push**: `git push origin feature/amazing-feature`
+8. **Open a Pull Request**
+
+### Guidelines
+
+- Follow existing code style (enforced by `ruff`)
+- Add tests for new functionality
+- Update documentation as needed
+- Keep commits focused and atomic
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- [Rich](https://github.com/Textualize/rich) for beautiful terminal output
+- [Typer](https://github.com/tiangolo/typer) for the CLI framework
+- [httpx](https://github.com/encode/httpx) for async HTTP
+- [Pydantic](https://github.com/pydantic/pydantic) for data validation
+
+---
+
+<p align="center">
+  Made with ❤️ by the CrackTech Team
+</p>
