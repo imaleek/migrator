@@ -243,7 +243,7 @@ class TestRegistryClientRepositories:
         mock_httpx_client.get.return_value = mock_response
         client._client = mock_httpx_client
         
-        repos = await client.list_repositories()
+        repos = [r async for r in client.list_repositories()]
         assert repos == ["app1", "app2"]
     
     @pytest.mark.asyncio
@@ -256,7 +256,7 @@ class TestRegistryClientRepositories:
         mock_httpx_client.get.return_value = mock_response
         client._client = mock_httpx_client
         
-        repos = await client.list_repositories()
+        repos = [r async for r in client.list_repositories()]
         assert repos == []
     
     @pytest.mark.asyncio
@@ -275,7 +275,7 @@ class TestRegistryClientRepositories:
         mock_httpx_client.get.side_effect = [mock_response1, mock_response2]
         client._client = mock_httpx_client
         
-        repos = await client.list_repositories()
+        repos = [r async for r in client.list_repositories()]
         assert len(repos) >= 2
     
     @pytest.mark.asyncio
@@ -288,9 +288,9 @@ class TestRegistryClientRepositories:
         mock_httpx_client.get.return_value = mock_response
         client._client = mock_httpx_client
         
-        tags = await client.list_tags("app")
-        # list_tags returns sorted tags for determinism
-        assert tags == ["latest", "v1.0"]
+        tags = [t async for t in client.list_tags("app")]
+        # list_tags returns tags in order of appearance from registry
+        assert tags == ["v1.0", "latest"]
     
     @pytest.mark.asyncio
     async def test_list_tags_not_found(self, client, mock_httpx_client):
@@ -300,7 +300,7 @@ class TestRegistryClientRepositories:
         mock_httpx_client.get.return_value = mock_response
         client._client = mock_httpx_client
         
-        tags = await client.list_tags("nonexistent")
+        tags = [t async for t in client.list_tags("nonexistent")]
         assert tags == []
 
 

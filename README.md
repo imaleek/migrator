@@ -19,7 +19,7 @@
 
 ## ✨ Features
 
-- **🐳 Direct Registry Transfer** — No Docker daemon required. Uses Registry HTTP API v2 directly for maximum efficiency
+- **🐳 Direct Registry Transfer** — No Docker/Helm daemon required. Uses Registry HTTP API v2 directly for maximum efficiency
 - **⚡ Parallel Processing** — Configurable parallelism at both image and layer levels
 - **🔄 Resume Capability** — Automatic checkpoint saving enables seamless recovery from interruptions
 - **💾 Smart Blob Caching** — Reduces redundant checks for shared base layers across images
@@ -89,12 +89,12 @@ docker build -t migrator-builder . && docker cp $(docker create migrator-builder
 
 ### Requirements
 
-| Dependency | Purpose | Required |
-|------------|---------|:--------:|
-| **Python 3.10+** | Runtime | ✅ |
-| **Helm 3.8+** | Helm chart migration | Optional |
+ | Dependency | Purpose | Required |
+ |------------|---------|:--------:|
+ | **Python 3.10+** | Runtime | ✅ |
+ | **No External Tools** | Native OCI | ✅ |
 
-> **Note**: Docker is **not required** for image migration. The tool uses the Registry HTTP API v2 directly.
+ > **Note**: Docker and Helm CLIs are **not required**. The tool uses the Registry HTTP API v2 directly for all operations.
 
 ## 🚀 Quick Start
 
@@ -480,8 +480,6 @@ Helm clients not initialized
 
 **Solutions:**
 
-- Ensure Helm 3.8+ is installed and in PATH
-- Run `helm version` to verify
 - Some registries (e.g., Huawei SWR Basic) don't support OCI charts; use `--skip-charts`
 
 #### Connection Timeouts

@@ -16,12 +16,53 @@ from rich.logging import RichHandler
 if TYPE_CHECKING:
     pass
 
+import re
+
 _lock = threading.Lock()
 _handlers_configured: set[str] = set()
 _global_level: int = logging.WARNING
 _shared_console: Console | None = None
 _log_file_path: Path | None = None
 _file_handler: logging.Handler | None = None
+
+
+class SecretRedactingFilter(logging.Filter):
+    """
+    Log filter that redacts secrets from log records.
+    
+    Automatically detects and masks:
+    - Bearer tokens
+    - Basic auth credentials (base64)
+    - Password fields in URLs
+    - Common secret keys
+    """
+    
+    # Patterns to redact
+    # Group 2 is what gets replaced
+    PATTERNS = [
+        # Bearer tokens (long alphanumeric strings)
+        (r'(Bearer\s+)([a-zA-Z0-9\-\._\~\+\/]{20,})', r'\1[REDACTED]'),
+        # Basic auth (base64 strings that look like auth)
+        (r'(Basic\s+)([a-zA-Z0-9\+\/]{20,}=*)', r'\1[REDACTED]'),
+        # URL passwords: ://user:pass@host
+        (r'(://[^:]+:)([^@]+)(@)', r'\1[REDACTED]\3'),
+        # Token/Secret parameters
+        (r'((?:token|secret|password|key)\s*=\s*)(["\']?)([^"\'>\s&]{4,})\2', r'\1\2[REDACTED]\2'),
+    ]
+    
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not isinstance(record.msg, str):
+            return True
+            
+        msg = record.msg
+        for pattern, replacement in self.PATTERNS:
+            try:
+                msg = re.sub(pattern, replacement, msg)
+            except Exception:
+                pass # Safety catch
+                
+        record.msg = msg
+        return True
 
 
 def set_console(console: Console) -> None:
@@ -102,6 +143,9 @@ def get_logger(name: str = __name__, level: int | None = None) -> logging.Logger
 
     with _lock:
         if name not in _handlers_configured:
+            # Add redaction filter to logger itself (applies to all handlers)
+            logger.addFilter(SecretRedactingFilter())
+
             # Use RichHandler for console output
             # When file logging is enabled, console only shows WARNING+
             console_level = logging.WARNING if _log_file_path else effective_level

@@ -8,6 +8,10 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 import time
 
+async def async_iter(items):
+    for i in items:
+        yield i
+
 from migrators import BaseMigrator, MigrationContext
 from migrators.container_registry import ContainerRegistryMigrator
 from config import (
@@ -205,7 +209,7 @@ class TestContainerRegistryMigratorDiscovery:
     async def test_discover_empty(self, migrator, mock_console):
         """Test discovery with no repositories."""
         mock_source = AsyncMock()
-        mock_source.list_repositories = AsyncMock(return_value=[])
+        mock_source.list_repositories = MagicMock(side_effect=lambda: async_iter([]))
         
         migrator._source_client = mock_source
         mock_console.status = MagicMock()
@@ -336,6 +340,33 @@ class TestContainerRegistryMigratorMigration:
         assert result.success is False
         assert "connection lost" in result.error
 
+    @pytest.mark.asyncio
+    async def test_migrate_batch_cancellation(self, config, mock_console):
+        """Test graceful cancellation in batch migration."""
+        import asyncio
+        migrator = ContainerRegistryMigrator(config, mock_console)
+        items = [("image", "ref1")]
+        
+        # Mock worker tasks
+        mock_worker = MagicMock()
+        mock_worker.cancel = MagicMock()
+        
+        # Mock gather: first call raises CancelledError, second call (cleanup) returns list
+        # We need AsyncMock because gather is awaited
+        mock_gather = AsyncMock(side_effect=[asyncio.CancelledError, []])
+        
+        with patch('asyncio.gather', mock_gather), \
+             patch('asyncio.create_task', return_value=mock_worker):
+            
+            # Should re-raise CancelledError
+            with pytest.raises(asyncio.CancelledError):
+                await migrator._migrate_batch(items, MagicMock())
+            
+            # Verify cancel was called on workers
+            assert mock_worker.cancel.called
+            # Verify gather was called twice (once for execution, once for cleanup)
+            assert mock_gather.call_count == 2
+
 
 class TestContainerRegistryMigratorLogging:
     """Tests for logging in ContainerRegistryMigrator."""
@@ -397,8 +428,9 @@ class TestContainerRegistryMigratorRun:
         with patch.object(RegistryClient, 'connect', new_callable=AsyncMock), \
              patch.object(RegistryClient, 'close', new_callable=AsyncMock), \
              patch.object(RegistryClient, 'check_connectivity', new_callable=AsyncMock, return_value=True), \
-             patch.object(RegistryClient, 'list_repositories', new_callable=AsyncMock, return_value=["app"]), \
-             patch.object(RegistryClient, 'list_tags', new_callable=AsyncMock, return_value=["v1.0"]):
+             patch.object(RegistryClient, 'check_connectivity', new_callable=AsyncMock, return_value=True), \
+             patch.object(RegistryClient, 'list_repositories', side_effect=lambda: async_iter(["app"])), \
+             patch.object(RegistryClient, 'list_tags', side_effect=lambda *args: async_iter(["v1.0"])):
             
             summary = await migrator.run()
             assert summary.total_items >= 0

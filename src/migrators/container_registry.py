@@ -20,7 +20,6 @@ from config import (
 from console import MigrationConsole
 from migrators import BaseMigrator
 from services.blob_cache import BlobCache
-from services.helm_client import HelmChartError, HelmClient
 from services.migration_state import MigrationState
 from services.registry_client import ImageTransferError, RegistryClient, RegistryConnectionError
 from utilities.logger import get_logger
@@ -45,8 +44,6 @@ class ContainerRegistryMigrator(BaseMigrator):
         super().__init__(config, console)
         self._source_client: RegistryClient | None = None
         self._dest_client: RegistryClient | None = None
-        self._source_helm: HelmClient | None = None
-        self._dest_helm: HelmClient | None = None
         self._images: list[ImageReference] = []
         self._charts: list[ChartReference] = []
         self._state: MigrationState | None = None
@@ -86,22 +83,6 @@ class ContainerRegistryMigrator(BaseMigrator):
         except RegistryConnectionError as e:
             self.console.show_error("Destination Registry Error", str(e))
             return False
-
-        # Initialize Helm clients for chart migration
-        self._source_helm = HelmClient(self.config.source)
-        self._dest_helm = HelmClient(self.config.destination)
-        
-        try:
-            await self._source_helm.initialize()
-            await self._source_helm.login()
-        except Exception as e:
-            logger.warning(f"Source Helm client init failed (charts may not migrate): {e}")
-        
-        try:
-            await self._dest_helm.initialize()
-            await self._dest_helm.login()
-        except Exception as e:
-            logger.warning(f"Destination Helm client init failed (charts may not migrate): {e}")
 
         return True
 
@@ -162,7 +143,7 @@ class ContainerRegistryMigrator(BaseMigrator):
 
         # Discover images
         with self.console.status("Fetching repository list..."):
-            repositories = await self._source_client.list_repositories()
+            repositories = [r async for r in self._source_client.list_repositories()]
 
         total_from_registry = len(repositories)
 
@@ -203,8 +184,8 @@ class ContainerRegistryMigrator(BaseMigrator):
                 last_error = None
                 for attempt in range(max_retries):
                     try:
-                        # list_tags now uses set for deduplication and handles auth retries internally
-                        tags = await self._source_client.list_tags(repo)
+                        # list_tags now uses async generator
+                        tags = [t async for t in self._source_client.list_tags(repo)]
                         if not tags:
                             scanned_count += 1
                             return []
@@ -507,48 +488,21 @@ class ContainerRegistryMigrator(BaseMigrator):
                     duration_seconds=time.time() - start_time,
                 )
 
-            # Check if helm clients are initialized
-            if not self._source_helm or not self._dest_helm:
-                raise HelmChartError(
-                    chart.full_reference,
-                    "copy",
-                    "Helm clients not initialized"
-                )
-
-            # Check if chart exists in destination (skip if configured)
-            if self.config.skip_existing:
-                try:
-                    # Build destination repository path for the chart
-                    if dest_prefix:
-                        dest_chart_repo = f"{dest_prefix}/{chart.name}"
-                    else:
-                        dest_chart_repo = chart.name
-                    
-                    manifest, _ = await self._dest_client.get_manifest(
-                        dest_chart_repo, chart.version
-                    )
-                    if manifest:
-                        logger.debug(f"Chart already exists, skipping: {dest_ref}")
-                        self.console.show_item_skipped(chart.full_reference)
-                        return MigrationResult(
-                            source=source_ref,
-                            destination=dest_ref,
-                            success=True,
-                            skipped=True,
-                            duration_seconds=time.time() - start_time,
-                        )
-                except ImageTransferError:
-                    pass  # Chart doesn't exist, proceed with migration
-
-            # Copy the chart with destination namespace
-            bytes_transferred = await self._source_helm.copy_chart(
-                chart,
-                self._dest_helm,
-                dest_prefix,  # Use destination namespace
+            # Copy the chart using native OCI transfer (same as images)
+            # Charts are just OCI artifacts with specific media types, which RegistryClient handles natively.
+            bytes_transferred = await self._source_client.copy_image(
+                dest_repo=dest_prefix + "/" + chart.name if dest_prefix else chart.name,
+                dest_ref=chart.version,
+                source_repo=f"{source_prefix}/{chart.name}" if source_prefix else chart.name,
+                source_ref=chart.version,
+                dest_client=self._dest_client,
+                layer_concurrency=self.config.layer_concurrency,
+                blob_cache=self._blob_cache,
             )
 
             duration = time.time() - start_time
-            self.console.show_item_success(chart.full_reference)
+            size_mb = bytes_transferred / (1024 * 1024)
+            self.console.show_item_success(chart.full_reference, size_mb)
 
             return MigrationResult(
                 source=source_ref,
@@ -558,15 +512,6 @@ class ContainerRegistryMigrator(BaseMigrator):
                 size_bytes=bytes_transferred,
             )
 
-        except HelmChartError as e:
-            self.console.show_item_failure(chart.full_reference, str(e))
-            return MigrationResult(
-                source=source_ref,
-                destination=dest_ref,
-                success=False,
-                error=str(e),
-                duration_seconds=time.time() - start_time,
-            )
         except Exception as e:
             self.console.show_item_failure(chart.full_reference, str(e))
             return MigrationResult(
@@ -582,89 +527,126 @@ class ContainerRegistryMigrator(BaseMigrator):
         items: list[tuple[str, Any]],
         progress_task
     ) -> list[MigrationResult]:
-        """Migrate a batch of items with parallelism and checkpoint saving."""
-        semaphore = asyncio.Semaphore(self.config.parallel_jobs)
+        """Migrate a batch of items with Producer-Consumer pattern."""
+        # Use a queue to manage items, preventing memory explosion from creating too many tasks
+        queue: asyncio.Queue = asyncio.Queue()
+        for item in items:
+            queue.put_nowait(item)
+            
+        final_results: list[MigrationResult] = []
         last_checkpoint_time = time.time()
         checkpoint_lock = asyncio.Lock()
-
-        async def migrate_with_semaphore(item):
+        
+        async def worker():
             nonlocal last_checkpoint_time
-            
-            item_type, ref = item
-            ref_key = ref.full_reference if hasattr(ref, 'full_reference') else str(ref)
-            
-            # Skip if already processed (resume support)
-            if self._state and self._state.is_item_processed(item_type, ref_key):
-                progress_task.advance(1)
-                return MigrationResult(
-                    source=ref_key,
-                    destination="",
-                    success=True,
-                    skipped=True,
-                )
-            
-            async with semaphore:
-                result = await self.migrate_item(item)
-                self.add_result(result)
-                progress_task.advance(1)
+            while True:
+                try:
+                    item = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
                 
-                # Update per-repository stats
-                if item_type == "image" and hasattr(ref, 'repository'):
-                    repo = ref.repository
-                    if repo in self._repo_stats:
-                        if result.success:
-                            if result.skipped:
-                                self._repo_stats[repo]["skipped"] += 1
-                            else:
-                                self._repo_stats[repo]["migrated"] += 1
-                        else:
-                            self._repo_stats[repo]["failed"] += 1
-                
-                # Update state
-                if self._state:
-                    if result.success:
-                        if result.skipped:
-                            self._state.mark_skipped(item_type, ref_key)
-                        else:
-                            self._state.mark_completed(item_type, ref_key)
-                    else:
-                        self._state.mark_failed(item_type, ref_key, result.error or "Unknown error")
+                try:
+                    item_type, ref = item
+                    ref_key = ref.full_reference if hasattr(ref, 'full_reference') else str(ref)
                     
-                    # Checkpoint saving (time-based or count-based)
-                    self._checkpoint_counter += 1
-                    async with checkpoint_lock:
-                        should_checkpoint = (
-                            self._checkpoint_counter >= self.config.checkpoint_interval or
-                            time.time() - last_checkpoint_time > 30  # 30 seconds
+                    # Skip if already processed (resume support)
+                    if self._state and self._state.is_item_processed(item_type, ref_key):
+                        progress_task.advance(1)
+                        # We don't add to results list for skipped/processed items to save memory,
+                        # or we could add a placeholder if strict accounting is needed.
+                        # For now, adhering to behavior: we skip the expensive join/migration logic.
+                        # But wait, original code returned a skipped result.
+                        skipped_result = MigrationResult(
+                            source=ref_key,
+                            destination="",
+                            success=True,
+                            skipped=True,
                         )
-                        if should_checkpoint:
-                            await self._state.save()
-                            self._checkpoint_counter = 0
-                            last_checkpoint_time = time.time()
-                
-                return result
+                        final_results.append(skipped_result)
+                        queue.task_done()
+                        continue
+                    
+                    try:
+                        result = await self.migrate_item(item)
+                        self.add_result(result)
+                        final_results.append(result)
+                        progress_task.advance(1)
+                        
+                        # Update per-repository stats
+                        if item_type == "image" and hasattr(ref, 'repository'):
+                            repo = ref.repository
+                            if repo in self._repo_stats:
+                                if result.success:
+                                    if result.skipped:
+                                        self._repo_stats[repo]["skipped"] += 1
+                                    else:
+                                        self._repo_stats[repo]["migrated"] += 1
+                                else:
+                                    self._repo_stats[repo]["failed"] += 1
+                        
+                        # Update state
+                        if self._state:
+                            if result.success:
+                                if result.skipped:
+                                    self._state.mark_skipped(item_type, ref_key)
+                                else:
+                                    self._state.mark_completed(item_type, ref_key)
+                            else:
+                                self._state.mark_failed(item_type, ref_key, result.error or "Unknown error")
+                            
+                            # Checkpoint saving
+                            self._checkpoint_counter += 1
+                            async with checkpoint_lock:
+                                should_checkpoint = (
+                                    self._checkpoint_counter >= self.config.checkpoint_interval or
+                                    time.time() - last_checkpoint_time > 30
+                                )
+                                if should_checkpoint:
+                                    await self._state.save()
+                                    self._checkpoint_counter = 0
+                                    last_checkpoint_time = time.time()
+                                    
+                    except Exception as e:
+                        # Handle migration exception
+                        logger.exception(f"Error migrating {ref_key}")
+                        error_result = MigrationResult(
+                            source=ref_key,
+                            destination="",
+                            success=False,
+                            error=str(e),
+                        )
+                        final_results.append(error_result)
+                        if self._state:
+                            self._state.mark_failed(item_type, ref_key, str(e))
+                            
+                except asyncio.CancelledError:
+                    # Clean exit on cancellation
+                    return
+                except KeyboardInterrupt:
+                    # Clean exit on interrupt
+                    return
+                except Exception as e:
+                    logger.error(f"Worker critical error: {e}")
+                finally:
+                    queue.task_done()
 
-        tasks = [migrate_with_semaphore(item) for item in items]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Handle any exceptions that weren't caught
-        final_results = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                item_type, ref = items[i]
-                ref_key = ref.full_reference if hasattr(ref, 'full_reference') else str(ref)
-                error_result = MigrationResult(
-                    source=ref_key,
-                    destination="",
-                    success=False,
-                    error=str(result),
-                )
-                final_results.append(error_result)
-                # Update state for exceptions
-                if self._state:
-                    self._state.mark_failed(item_type, ref_key, str(result))
-            else:
-                final_results.append(result)
+        # Start workers
+        workers = [
+            asyncio.create_task(worker()) 
+            for _ in range(self.config.parallel_jobs)
+        ]
+        
+        try:
+            # Wait for all workers to complete
+            await asyncio.gather(*workers)
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            logger.warning("Migration interrupted - stopping workers...")
+            # Cancel all running workers
+            for w in workers:
+                w.cancel()
+            # Wait for workers to finish (suppress errors)
+            await asyncio.gather(*workers, return_exceptions=True)
+            raise
 
         # Final checkpoint save
         if self._state:
@@ -741,14 +723,21 @@ class ContainerRegistryMigrator(BaseMigrator):
                             ref.full_reference if hasattr(ref, 'full_reference') else str(ref)
                         )
                     )
+                    processed = len(items) - unprocessed
                 else:
                     unprocessed = len(items)
+                    processed = 0
                 
-                if unprocessed > 10 and not self.console.confirm(
-                    f"Migrate {unprocessed} items? This may take a while."
-                ):
-                    self.console.show_info("Migration cancelled by user")
-                    return self.finalize_summary(start_time)
+                if unprocessed > 10:
+                    msg = f"Migrate {unprocessed} items?"
+                    if processed > 0:
+                        msg = f"Found {len(items)} items ({processed} already processed). Migrate remaining {unprocessed} items?"
+                    else:
+                        msg = f"Migrate {unprocessed} items?"
+                    
+                    if not self.console.confirm(f"{msg} This may take a while."):
+                        self.console.show_info("Migration cancelled by user")
+                        return self.finalize_summary(start_time)
 
             # Run migration with progress tracking
             with self.console.migration_progress(len(items)) as progress:
@@ -807,10 +796,6 @@ class ContainerRegistryMigrator(BaseMigrator):
                 await self._source_client.close()
             if self._dest_client:
                 await self._dest_client.close()
-            if self._source_helm:
-                await self._source_helm.cleanup()
-            if self._dest_helm:
-                await self._dest_helm.cleanup()
 
     def _log_repository_summary(self) -> None:
         """Log per-repository migration accountability summary."""

@@ -7,7 +7,7 @@ import pytest
 from typer.testing import CliRunner
 from unittest.mock import patch, MagicMock
 
-from main import app, check_tools
+from main import app
 from config import MigrationSummary
 from utilities.version import version
 
@@ -47,46 +47,12 @@ class TestCLIHelp:
 class TestInfoCommand:
     """Tests for the info command."""
     
-    def test_info_command_all_tools(self):
-        """Test info command when all tools are available."""
-        with patch('main.check_tools', return_value={"docker": True, "helm": True}):
-            result = runner.invoke(app, ["info"])
-            assert result.exit_code == 0
-    
-    def test_info_command_no_tools(self):
-        """Test info command when no tools are available."""
-        with patch('shutil.which', return_value=None):
-            result = runner.invoke(app, ["info"])
-            assert result.exit_code == 0
-
-
-class TestCheckTools:
-    """Tests for check_tools function."""
-    
-    def test_all_tools_available(self):
-        """Test when all tools are available."""
-        with patch('shutil.which') as mock_which:
-            mock_which.side_effect = lambda x: f"/usr/bin/{x}"
-            tools = check_tools()
-            assert tools["docker"] is True
-            assert tools["helm"] is True
-    
-    def test_no_tools_available(self):
-        """Test when no tools are available."""
-        with patch('shutil.which', return_value=None):
-            tools = check_tools()
-            assert tools["docker"] is False
-            assert tools["helm"] is False
-    
-    def test_partial_tools(self):
-        """Test when some tools are available."""
-        def mock_which(cmd):
-            return "/usr/bin/docker" if cmd == "docker" else None
-        
-        with patch('shutil.which', side_effect=mock_which):
-            tools = check_tools()
-            assert tools["docker"] is True
-            assert tools["helm"] is False
+    def test_info_command(self):
+        """Test info command execution."""
+        result = runner.invoke(app, ["info"])
+        assert result.exit_code == 0
+        assert "Python" in result.output
+        assert "Platform" in result.output
 
 
 class TestMigrateContainerRegistry:

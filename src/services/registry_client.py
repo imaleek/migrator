@@ -53,6 +53,7 @@ class ManifestInfo:
     media_type: str
     size: int
     config_digest: str | None = None
+    config_media_type: str | None = None
     layers: list[dict[str, Any]] = None
 
     def __post_init__(self):
@@ -271,6 +272,11 @@ class RegistryClient:
             self._token = data.get("token") or data.get("access_token")
             self._token_scope = scope  # Track the scope we requested
             logger.debug(f"Obtained auth token with scope: {scope}")
+        elif token_response.status_code == 404:
+            # Fallback for registries (like Huawei SWR) that might send Bearer challenge
+            # but actually support/require Basic auth or have broken token endpoints
+            logger.warning(f"Token endpoint returned 404 for {realm}. Falling back to Basic Auth.")
+            return
         else:
             raise RegistryAuthenticationError(
                 self.registry,
@@ -371,20 +377,20 @@ class RegistryClient:
                 str(e)
             ) from e
 
-    async def list_repositories(self) -> list[str]:
+    async def list_repositories(self) -> AsyncIterator[str]:
         """
         List all repositories in the registry.
 
         Fetches ALL repositories using pagination.
 
-        Returns:
-            List of repository names
+        Yields:
+            Repository names
         """
-        repositories = []
         url = f"{self.base_url}/_catalog"
         # Use large page size for efficient retrieval
         page_size = 1000
         params = {"n": page_size}
+        count = 0
 
         logger.debug(f"Listing repositories from: {url}")
 
@@ -414,11 +420,14 @@ class RegistryClient:
 
             data = response.json()
             new_repos = data.get("repositories", [])
-            repositories.extend(new_repos)
             
+            for repo in new_repos:
+                yield repo
+                count += 1
+                
             # Log progress for large registries
-            if len(repositories) % 100 == 0 and len(repositories) > 0:
-                logger.info(f"Retrieved {len(repositories)} repositories so far...")
+            if count % 100 == 0 and count > 0:
+                logger.info(f"Retrieved {count} repositories so far...")
 
             # Check for pagination
             link = response.headers.get("Link", "")
@@ -433,23 +442,19 @@ class RegistryClient:
             else:
                 break
 
-        logger.info(f"Retrieved {len(repositories)} total repositories")
-        return repositories
+        logger.info(f"Retrieved {count} total repositories")
 
-    async def list_tags(self, repository: str) -> list[str]:
+    async def list_tags(self, repository: str) -> AsyncIterator[str]:
         """
         List all tags for a repository.
 
-        Uses pagination with the 'last' parameter based on actual response data,
-        not the Link header, due to Azure ACR pagination bugs.
-
-        Args:
-            repository: Repository name
-
-        Returns:
-            List of tag names (sorted for deterministic ordering)
+        Uses pagination with the 'last' parameter based on actual response data.
+        
+        Yields:
+            Tag names
         """
-        all_tags: list[str] = []
+        # all_tags: list[str] = [] # Removed buffer
+        seen_tags: set[str] = set()
         base_url = f"{self.base_url}/{quote(repository, safe='/')}/tags/list"
         
         # Use smaller page size - Azure ACR has bugs with large page sizes (1000)
@@ -459,6 +464,7 @@ class RegistryClient:
         auth_retries = 0
         page = 0
         max_pages = 10000  # Safety limit to prevent infinite loops
+        count = 0
 
         logger.debug(f"Listing tags for {repository}")
 
@@ -489,7 +495,7 @@ class RegistryClient:
 
             if response.status_code == 404:
                 logger.debug(f"Repository not found: {repository}")
-                return []
+                return
 
             if response.status_code != 200:
                 logger.warning(f"Failed to list tags for {repository}: {response.status_code}")
@@ -505,11 +511,15 @@ class RegistryClient:
                 # No more tags
                 break
             
-            all_tags.extend(new_tags)
+            for tag in new_tags:
+                if tag not in seen_tags:
+                    seen_tags.add(tag)
+                    yield tag
+                    count += 1
             
             # Log progress for repositories with many tags
-            if len(all_tags) % 500 == 0:
-                logger.info(f"Retrieved {len(all_tags)} tags for {repository} so far...")
+            if count % 500 == 0:
+                logger.info(f"Retrieved {count} tags for {repository} so far...")
             
             last_tag = new_tags[-1]
             
@@ -517,16 +527,8 @@ class RegistryClient:
             if len(new_tags) < page_size:
                 break
 
-        # Deduplicate (shouldn't be needed but safety measure) and sort
-        result = sorted(set(all_tags))
-        
-        if len(result) != len(all_tags):
-            logger.debug(f"Deduplicated {len(all_tags) - len(result)} tags for {repository}")
-        
-        if len(result) > 0:
-            logger.debug(f"Retrieved {len(result)} total tags for {repository}")
-        
-        return result
+        if count > 0:
+            logger.debug(f"Retrieved {count} total tags for {repository}")
 
     async def get_manifest(
         self,
@@ -582,17 +584,20 @@ class RegistryClient:
         # Extract layer information
         layers = []
         config_digest = None
+        config_media_type = None
 
         if "layers" in manifest_data:
             layers = manifest_data["layers"]
         if "config" in manifest_data:
             config_digest = manifest_data["config"].get("digest")
+            config_media_type = manifest_data["config"].get("mediaType")
 
         info = ManifestInfo(
             digest=digest,
             media_type=media_type,
             size=len(content),
             config_digest=config_digest,
+            config_media_type=config_media_type,
             layers=layers,
         )
 
@@ -1302,7 +1307,7 @@ class RegistryClient:
                             dest_repo,
                             manifest_info.config_digest,
                             config_data,
-                            "application/vnd.docker.container.image.v1+json"
+                            manifest_info.config_media_type or "application/vnd.docker.container.image.v1+json"
                         )
                         total_bytes += len(config_data)
                         if blob_cache:

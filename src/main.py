@@ -6,7 +6,6 @@ Supports container registry migration with extensible architecture for future mi
 """
 import asyncio
 import logging
-import shutil
 import sys
 
 import typer
@@ -51,13 +50,7 @@ def version_callback(value: bool):
         raise typer.Exit()
 
 
-def check_tools() -> dict[str, bool]:
-    """Check for required tools availability."""
-    tools = {
-        "docker": shutil.which("docker") is not None,
-        "helm": shutil.which("helm") is not None,
-    }
-    return tools
+
 
 
 @app.callback()
@@ -318,10 +311,7 @@ def migrate_container_registry(
     # Create console UI
     ui = MigrationConsole(verbose=verbose)
 
-    # Check for required tools
-    tools = check_tools()
-    if verbose:
-        ui.print_tool_status(tools)
+
 
     # Note: We don't require Docker for image migration (using HTTP API)
     # Helm is only required for Helm chart migration
@@ -374,7 +364,7 @@ def migrate_container_registry(
         if summary.failed > 0:
             raise typer.Exit(1)
 
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         ui.show_warning("\nMigration interrupted by user")
         raise typer.Exit(130) from None
     except Exception as e:
@@ -394,7 +384,7 @@ def migrate_container_registry(
 @app.command()
 def info():
     """
-    📋 Display system information and tool availability.
+    📋 Display system information.
     """
     ui = MigrationConsole()
 
@@ -403,10 +393,6 @@ def info():
         border_style="cyan"
     ))
     console.print()
-
-    # Check tools
-    tools = check_tools()
-    ui.print_tool_status(tools)
 
     # Show Python version
     console.print(f"\n[bold]Python:[/bold] {sys.version.split()[0]}")
