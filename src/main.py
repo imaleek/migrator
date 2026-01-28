@@ -392,7 +392,6 @@ def info():
         f"[bold cyan] Migrator[/bold cyan] {version}",
         border_style="cyan"
     ))
-    console.print()
 
     # Show Python version
     console.print(f"\n[bold]Python:[/bold] {sys.version.split()[0]}")

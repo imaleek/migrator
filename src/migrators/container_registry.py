@@ -552,10 +552,6 @@ class ContainerRegistryMigrator(BaseMigrator):
                     # Skip if already processed (resume support)
                     if self._state and self._state.is_item_processed(item_type, ref_key):
                         progress_task.advance(1)
-                        # We don't add to results list for skipped/processed items to save memory,
-                        # or we could add a placeholder if strict accounting is needed.
-                        # For now, adhering to behavior: we skip the expensive join/migration logic.
-                        # But wait, original code returned a skipped result.
                         skipped_result = MigrationResult(
                             source=ref_key,
                             destination="",
