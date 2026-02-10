@@ -35,7 +35,7 @@ from tenacity import (
 
 from config import RegistryCredentials
 from utilities.exceptions import (
-    ImageTransferError,
+    ManifestTransferError,
     MigratorError,
     RegistryAuthenticationError,
     RegistryConnectionError,
@@ -567,7 +567,7 @@ class RegistryClient:
             response = await self._client.get(url, headers=headers)
 
         if response.status_code != 200:
-            raise ImageTransferError(
+            raise ManifestTransferError(
                 f"{repository}:{reference}",
                 f"Failed to get manifest: {response.status_code}"
             )
@@ -768,7 +768,7 @@ class RegistryClient:
             headers=self._get_auth_header(),
         ) as response:
             if response.status_code != 200:
-                raise ImageTransferError(
+                raise ManifestTransferError(
                     f"{repository}@{digest}",
                     f"Failed to download blob: {response.status_code}"
                 )
@@ -853,7 +853,7 @@ class RegistryClient:
             logger.warning(f"Blob upload transient error: {e.status_code}")
             raise
         except RetryError as e:
-            raise ImageTransferError(
+            raise ManifestTransferError(
                 f"{repository}@{digest}",
                 f"Failed to upload blob after retries: {e}"
             ) from e
@@ -898,7 +898,7 @@ class RegistryClient:
 
         if response.status_code not in (200, 202):
             error_body = response.text[:500] if response.text else "No response body"
-            raise ImageTransferError(
+            raise ManifestTransferError(
                 f"{repository}@{digest}",
                 f"Failed to start upload: {response.status_code}",
                 error_body
@@ -907,7 +907,7 @@ class RegistryClient:
         # Get upload URL
         upload_url = response.headers.get("Location")
         if not upload_url:
-            raise ImageTransferError(
+            raise ManifestTransferError(
                 f"{repository}@{digest}",
                 "No upload URL in response"
             )
@@ -960,7 +960,7 @@ class RegistryClient:
                 f"Blob upload failed for {repository}@{digest}: "
                 f"status={response.status_code}, body={error_body}"
             )
-            raise ImageTransferError(
+            raise ManifestTransferError(
                 f"{repository}@{digest}",
                 f"Failed to upload blob: {response.status_code}",
                 error_body
@@ -1003,7 +1003,7 @@ class RegistryClient:
             )
 
         if response.status_code not in (200, 202):
-            raise ImageTransferError(
+            raise ManifestTransferError(
                 f"{repository}@{digest}",
                 f"Failed to start upload: {response.status_code}"
             )
@@ -1045,7 +1045,7 @@ class RegistryClient:
                 )
 
             if response.status_code not in (202, 204):
-                raise ImageTransferError(
+                raise ManifestTransferError(
                     f"{repository}@{digest}",
                     f"Chunk upload failed: {response.status_code}"
                 )
@@ -1077,7 +1077,7 @@ class RegistryClient:
             )
 
         if response.status_code != 201:
-            raise ImageTransferError(
+            raise ManifestTransferError(
                 f"{repository}@{digest}",
                 f"Failed to finalize upload: {response.status_code}"
             )
@@ -1123,7 +1123,7 @@ class RegistryClient:
                 return await self._upload_manifest_with_retry(
                     repository, current_reference, current_manifest, current_media_type
                 )
-            except ImageTransferError as e:
+            except ManifestTransferError as e:
                 # Check if this is a 400 error and we can try conversion
                 # Don't attempt conversion if reference is a digest (content must match)
                 can_convert = (
@@ -1171,7 +1171,7 @@ class RegistryClient:
             logger.warning(f"Manifest upload transient error: {e.status_code}")
             raise
         except RetryError as e:
-            raise ImageTransferError(
+            raise ManifestTransferError(
                 f"{repository}:{reference}",
                 f"Failed to upload manifest after retries: {e}"
             ) from e
@@ -1223,7 +1223,7 @@ class RegistryClient:
                 f"Manifest upload failed for {repository}:{reference}: "
                 f"status={response.status_code}, media_type={media_type}, body={error_body}"
             )
-            raise ImageTransferError(
+            raise ManifestTransferError(
                 f"{repository}:{reference}",
                 f"Failed to upload manifest: {response.status_code}",
                 error_body

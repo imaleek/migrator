@@ -71,7 +71,7 @@ class RetryExhaustedError(MigratorError):
         super().__init__(message, details)
 
 
-class ImageTransferError(MigratorError):
+class ManifestTransferError(MigratorError):
     """Raised when image transfer fails."""
 
     def __init__(self, image: str, message: str, details: str | None = None):

@@ -21,7 +21,7 @@ from console import MigrationConsole
 from migrators import BaseMigrator
 from services.blob_cache import BlobCache
 from services.migration_state import MigrationState
-from services.registry_client import ImageTransferError, RegistryClient, RegistryConnectionError
+from services.registry_client import ManifestTransferError, RegistryClient, RegistryConnectionError
 from utilities.logger import get_logger
 
 logger = get_logger(__name__)
@@ -384,7 +384,7 @@ class ContainerRegistryMigrator(BaseMigrator):
 
         try:
             # Check if image exists in destination (skip if configured)
-            if self.config.skip_existing:
+            if self.config.skip_existing and self._dest_client:
                 try:
                     manifest, _ = await self._dest_client.get_manifest(
                         dest_repo, image.tag
@@ -399,7 +399,7 @@ class ContainerRegistryMigrator(BaseMigrator):
                             skipped=True,
                             duration_seconds=time.time() - start_time,
                         )
-                except ImageTransferError:
+                except ManifestTransferError:
                     pass  # Image doesn't exist, proceed with migration
 
             # Perform the copy (dry run just skips)
@@ -438,7 +438,7 @@ class ContainerRegistryMigrator(BaseMigrator):
                 size_bytes=bytes_transferred,
             )
 
-        except ImageTransferError as e:
+        except ManifestTransferError as e:
             self.console.show_item_failure(image.full_reference, str(e))
             logger.error(f"Failed to migrate {source_ref}: {e}")
             return MigrationResult(
@@ -461,22 +461,43 @@ class ContainerRegistryMigrator(BaseMigrator):
 
     async def _migrate_chart(self, chart: ChartReference) -> MigrationResult:
         """Migrate a single Helm chart."""
-        # Build source and destination references
         source_prefix = self.config.source.repository_prefix
         dest_prefix = self.config.destination.repository_prefix
-        
-        source_ref = f"{self.config.source.registry}/{chart.full_reference}"
-        
-        # Apply destination namespace to the chart reference
-        if dest_prefix:
-            dest_chart_ref = f"{dest_prefix}/{chart.name}:{chart.version}"
+
+        # Determine source and destination repositories
+        if chart.repository:
+            source_repo = f"{chart.repository}/{chart.name}"
         else:
-            dest_chart_ref = f"{chart.name}:{chart.version}"
-        dest_ref = f"{self.config.destination.registry}/{dest_chart_ref}"
+            source_repo = chart.name
+            
+        base_repo = self._strip_namespace(source_repo, source_prefix)
+        dest_repo = self._apply_namespace(base_repo, dest_prefix)
+
+        # Build full references for logging
+        source_ref = f"{self.config.source.registry}/{source_repo}:{chart.version}"
+        dest_ref = f"{self.config.destination.registry}/{dest_repo}:{chart.version}"
         
         start_time = time.time()
 
         try:
+            if self.config.skip_existing and self._dest_client:
+                try:
+                    manifest, _ = await self._dest_client.get_manifest(
+                        dest_repo, chart.version
+                    )
+                    if manifest:
+                        logger.debug(f"Chart already exists, skipping: {dest_ref}")
+                        self.console.show_item_skipped(chart.full_reference)
+                        return MigrationResult(
+                            source=source_ref,
+                            destination=dest_ref,
+                            success=True,
+                            skipped=True,
+                            duration_seconds=time.time() - start_time,
+                        )
+                except ManifestTransferError:
+                    pass  # Chart doesn't exist, proceed with migration
+            
             # In dry run mode, we don't need initialized clients
             if self.config.dry_run:
                 logger.info(f"[DRY RUN] Would migrate chart: {source_ref} -> {dest_ref}")
@@ -491,11 +512,11 @@ class ContainerRegistryMigrator(BaseMigrator):
             # Copy the chart using native OCI transfer (same as images)
             # Charts are just OCI artifacts with specific media types, which RegistryClient handles natively.
             bytes_transferred = await self._source_client.copy_image(
-                dest_repo=dest_prefix + "/" + chart.name if dest_prefix else chart.name,
-                dest_ref=chart.version,
-                source_repo=f"{source_prefix}/{chart.name}" if source_prefix else chart.name,
+                source_repo=source_repo,
                 source_ref=chart.version,
                 dest_client=self._dest_client,
+                dest_repo=dest_repo,
+                dest_ref=chart.version,
                 layer_concurrency=self.config.layer_concurrency,
                 blob_cache=self._blob_cache,
             )

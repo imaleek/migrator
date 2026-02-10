@@ -258,6 +258,32 @@ class TestContainerRegistryMigratorMigration:
         assert result.success is True
     
     @pytest.mark.asyncio
+    async def test_migrate_chart_nested_repo(self, sample_migration_config, mock_console):
+        """Test chart migration with nested repository structure."""
+        sample_migration_config.dry_run = False
+        sample_migration_config.skip_existing = False
+        migrator = ContainerRegistryMigrator(sample_migration_config, mock_console)
+        
+        # Simulate a chart found in "helm/base"
+        chart = ChartReference(name="base", version="1.0.0", repository="helm")
+        
+        # Mock _source_client.copy_image to verify arguments
+        migrator._source_client = AsyncMock()
+        migrator._source_client.copy_image.return_value = 100
+        
+        # Initialize dest_client mock
+        migrator._dest_client = AsyncMock()
+
+        await migrator._migrate_chart(chart)
+        
+        # Verify copy_image was called with correct source_repo
+        # It should be "helm/base", not just "base" or "helm"
+        migrator._source_client.copy_image.assert_called_once()
+        call_kwargs = migrator._source_client.copy_image.call_args.kwargs
+        assert call_kwargs["source_repo"] == "helm/base"
+        assert call_kwargs["source_ref"] == "1.0.0"
+    
+    @pytest.mark.asyncio
     async def test_migrate_item_unknown_type(self, sample_migration_config, mock_console):
         """Test migrate_item with unknown type."""
         migrator = ContainerRegistryMigrator(sample_migration_config, mock_console)
@@ -318,7 +344,7 @@ class TestContainerRegistryMigratorMigration:
     @pytest.mark.asyncio
     async def test_migrate_image_transfer_error(self, config, mock_console):
         """Test image migration handles transfer error."""
-        from services.registry_client import ImageTransferError
+        from services.registry_client import ManifestTransferError
         
         config.skip_existing = False
         config.dry_run = False
@@ -328,7 +354,7 @@ class TestContainerRegistryMigratorMigration:
         mock_dest = AsyncMock()
         
         mock_source.copy_image = AsyncMock(
-            side_effect=ImageTransferError("app:v1.0", "connection lost")
+            side_effect=ManifestTransferError("app:v1.0", "connection lost")
         )
         
         migrator._source_client = mock_source

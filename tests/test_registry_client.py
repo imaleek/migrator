@@ -13,7 +13,7 @@ from services.registry_client import (
     RegistryClient,
     RegistryConnectionError,
     RegistryAuthenticationError,
-    ImageTransferError,
+    ManifestTransferError,
     ManifestInfo,
     BlobInfo,
 )
@@ -338,7 +338,7 @@ class TestRegistryClientManifests:
         mock_httpx_client.get.return_value = mock_response
         client._client = mock_httpx_client
         
-        with pytest.raises(ImageTransferError):
+        with pytest.raises(ManifestTransferError):
             await client.get_manifest("app", "nonexistent")
     
     @pytest.mark.asyncio
@@ -548,8 +548,8 @@ class TestRegistryExceptions:
         assert "test.io" in str(error)
     
     def test_image_transfer_error(self):
-        """Test ImageTransferError."""
-        error = ImageTransferError("app:v1.0", "Upload failed")
+        """Test ManifestTransferError."""
+        error = ManifestTransferError("app:v1.0", "Upload failed")
         assert "app:v1.0" in str(error)
         assert error.image == "app:v1.0"
 
