@@ -729,8 +729,8 @@ class ContainerRegistryMigrator(BaseMigrator):
                 self._state.set_total_discovered(len(items))
                 await self._state.save()
 
-            # Confirm migration (unless dry run)
-            if not self.config.dry_run:
+            # Confirm migration (unless dry run or non-interactive)
+            if not self.config.dry_run and not self.config.non_interactive:
                 # Calculate unprocessed items for confirmation
                 if self._state:
                     unprocessed = sum(

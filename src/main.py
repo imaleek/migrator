@@ -256,6 +256,12 @@ def migrate_container_registry(
         help="Number of parallel repository scans (reduce if getting disconnections)",
         rich_help_panel="Performance",
     ),
+    non_interactive: bool = typer.Option(
+        False,
+        "--non-interactive",
+        help="Skip interactive confirmation prompts (useful for scripts)",
+        rich_help_panel="Migration Options",
+    ),
 ):
     """
     🐳 [bold]Migrate container images and Helm charts between registries.[/bold]
@@ -347,7 +353,9 @@ def migrate_container_registry(
             resume=resume,
             state_dir=state_dir,
             layer_concurrency=layer_concurrency,
+
             scan_concurrency=scan_concurrency,
+            non_interactive=non_interactive,
         )
 
     except ValueError as e:

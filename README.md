@@ -213,6 +213,7 @@ Main command for migrating container images and Helm charts.
 | `--parallel` | `-p` | 4 | Parallel image migrations (1-20) |
 | `--dry-run` | `-n` | false | Simulate without making changes |
 | `--skip-existing` | | true | Skip images that already exist in destination |
+| `--non-interactive` | | false | Skip confirmation prompts (ideal for CI/CD) |
 
 #### Filtering Options
 

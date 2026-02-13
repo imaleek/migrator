@@ -174,3 +174,25 @@ class TestMigrateContainerRegistry:
                 "--dry-run",
             ])
             assert result.exit_code == 0
+
+    def test_non_interactive_flag(self):
+        """Test migration with non-interactive flag."""
+        mock_summary = MigrationSummary(
+            total_items=5,
+            successful=5,
+            failed=0,
+        )
+        
+        with patch('asyncio.run', return_value=mock_summary):
+            result = runner.invoke(app, [
+                "migrate", "container-registry",
+                "--source-registry", "src.io",
+                "--source-user", "user",
+                "--source-password", "pass",
+                "--destination-registry", "dst.io",
+                "--destination-user", "user",
+                "--destination-password", "pass",
+                "--non-interactive",
+                "--dry-run",
+            ])
+            assert result.exit_code == 0

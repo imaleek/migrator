@@ -154,6 +154,7 @@ class MigrationConfig(BaseModel):
     checkpoint_interval: int = Field(default=50, ge=10, le=500, description="Save state every N items")
     # Scan performance options
     scan_concurrency: int = Field(default=10, ge=1, le=50, description="Parallel repository scans")
+    non_interactive: bool = Field(default=False, description="Skip interactive confirmation prompts")
 
     @field_validator("include_pattern", "exclude_pattern")
     @classmethod
